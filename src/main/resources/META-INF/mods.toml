@@ -1,0 +1,27 @@
+modLoader="javafml"
+loaderVersion="[64,)"
+license="MIT"
+
+[[dependencies.oneblock]]
+    modId="forge"
+    mandatory=true
+    versionRange="[64,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.oneblock]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[26,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[mods]]
+    modId="oneblock"
+    version="1.0.0"
+    displayName="OneBlock Multijoueur"
+    description='''
+    Un mod OneBlock multijoueur pour Forge.
+    Chaque joueur commence sur son propre bloc, isolé des autres.
+    '''
+    authors="AbdelRMB"
