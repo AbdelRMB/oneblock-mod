@@ -17,6 +17,7 @@ import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.listener.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.server.ServerLifecycleHooks;
 
 import java.util.Map;
 import java.util.UUID;
@@ -42,7 +43,8 @@ public class IslandExpansionHandler {
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent.Post event) {
-        MinecraftServer server = event.getServer();
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server == null) return;
         ServerLevel overworld  = server.overworld();
 
         // Vérifie le cycle journalier pour chaque joueur connecté (toutes les 40 ticks = 2 s)
@@ -58,7 +60,7 @@ public class IslandExpansionHandler {
     @SubscribeEvent
     public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
-        MinecraftServer server = player.getServer();
+        MinecraftServer server = (MinecraftServer) player.level().getServer();
         if (server == null) return;
 
         UUID playerId = player.getUUID();
@@ -76,7 +78,7 @@ public class IslandExpansionHandler {
     @SubscribeEvent
     public static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
-        MinecraftServer server = player.getServer();
+        MinecraftServer server = (MinecraftServer) player.level().getServer();
         if (server == null) return;
 
         UUID playerId = player.getUUID();
@@ -98,7 +100,7 @@ public class IslandExpansionHandler {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
         if (event.getLevel().isClientSide()) return;
 
-        MinecraftServer server = player.getServer();
+        MinecraftServer server = (MinecraftServer) player.level().getServer();
         if (server == null) return;
 
         UUID playerId = player.getUUID();
