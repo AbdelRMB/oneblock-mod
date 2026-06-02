@@ -12,9 +12,7 @@ import net.minecraft.server.level.ServerBossEvent;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.BossEvent;
-import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.event.entity.player.TradeWithVillagerEvent;
 import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.listener.SubscribeEvent;
@@ -130,35 +128,6 @@ public class IslandExpansionHandler {
 
         // Met à jour la barre boss
         updateExtensionBar(player);
-    }
-
-    // ─── Trade avec le marchand ───────────────────────────────────────────────
-
-    @SubscribeEvent
-    public static void onTradeWithVillager(TradeWithVillagerEvent event) {
-        if (!(event.getEntity() instanceof ServerPlayer player)) return;
-        MinecraftServer server = player.getServer();
-        if (server == null) return;
-
-        // Vérifie que c'est bien notre marchand
-        UUID traderId = event.getVillager().getUUID();
-        if (!TraderManager.managedTraderIds.contains(traderId)) return;
-
-        // Cherche un "bon de mob" dans l'inventaire qui vient d'être ajouté
-        for (ItemStack stack : player.getInventory().items) {
-            String mobKey = TraderManager.getMobKeyFromItem(stack);
-            if (mobKey != null) {
-                // Consomme le bon et met le mob en file d'attente
-                stack.shrink(1);
-                TraderManager.queueMobForPlayer(player.getUUID(), mobKey, server);
-                String name = mobKey.contains(":") ? mobKey.split(":")[1] : mobKey;
-                player.sendSystemMessage(Component.literal(
-                    "§a✓ §f" + capitalize(name.replace("_", " "))
-                    + " §7sera livré demain à l'arrivée du marchand."
-                ));
-                break;
-            }
-        }
     }
 
     // ─── Barre boss d'extension ───────────────────────────────────────────────

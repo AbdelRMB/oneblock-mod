@@ -1,8 +1,10 @@
 package com.oneblock.mod.event;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.oneblock.mod.OneBlockMod;
 import com.oneblock.mod.data.PlayerDataManager;
+import com.oneblock.mod.trader.TraderManager;
 import com.oneblock.mod.world.OneBlockWorldGen;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -72,6 +74,26 @@ public class OneBlockCommands {
                         );
                         return 1;
                     })
+                )
+        );
+
+        // ── /trader ──────────────────────────────────────────────────────────
+        dispatcher.register(
+            Commands.literal("trader")
+                .executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                    TraderManager.openTraderGui(player);
+                    return 1;
+                })
+                .then(Commands.literal("buy")
+                    .then(Commands.argument("id", IntegerArgumentType.integer(1))
+                        .executes(ctx -> {
+                            ServerPlayer player = ctx.getSource().getPlayerOrException();
+                            int id = IntegerArgumentType.getInteger(ctx, "id");
+                            TraderManager.processBuy(player, id);
+                            return 1;
+                        })
+                    )
                 )
         );
     }

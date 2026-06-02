@@ -9,18 +9,18 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.EntityType;
-import net.minecraft.world.entity.npc.Villager;
-import net.minecraft.world.entity.npc.VillagerProfession;
-import net.minecraft.world.entity.npc.VillagerType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.item.trading.MerchantOffer;
-import net.minecraft.world.item.trading.MerchantOffers;
 
 import java.io.File;
 import java.io.IOException;
@@ -29,260 +29,361 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Gère le villageois marchand quotidien de chaque joueur.
+ * Gère le marchand quotidien de chaque joueur.
  *
- * Cycle :
- *   - Un nouveau marchand apparaît chaque matin (jour Minecraft).
- *   - À son arrivée : feu d'artifice + spawn des mobs commandés la veille.
- *   - Ses trades dépendent du niveau d'extension du joueur.
- *   - Quand un joueur achète un "bon de mob", le mob est ajouté à la file
- *     de spawn et apparaîtra au prochain marchand.
+ * Le marchand est virtuel (pas d'entité spawnée) : quand un nouveau jour
+ * commence, le joueur reçoit un message avec des liens cliquables pour
+ * acheter. La commande /trader affiche l'interface de commerce.
+ *
+ * Acheter un mob → il rejoint la file d'attente → spawne le lendemain.
  */
 public class TraderManager {
 
-    /** UUIDs des marchands actifs (playerUUID → traderEntityUUID). */
-    private static final Map<UUID, UUID> activeTraders = new ConcurrentHashMap<>();
-
-    /** IDs des marchands que nous avons spawnés (pour filtrer les trades). */
-    public static final Set<UUID> managedTraderIds = ConcurrentHashMap.newKeySet();
-
-    /** Dernier jour Minecraft où un marchand a été spawné pour ce joueur. */
+    /** Dernier jour Minecraft où le marchand est apparu. */
     private static final Map<UUID, Long> lastTraderDay = new ConcurrentHashMap<>();
 
-    /** Mobs en attente de spawn pour le prochain marchand (playerUUID → liste de mob keys). */
+    /** Mobs en attente de spawn (playerUUID → liste de clés EntityType). */
     private static final Map<UUID, List<String>> pendingMobs = new ConcurrentHashMap<>();
+
+    // ─── Entrée de trade ─────────────────────────────────────────────────────
+
+    /**
+     * Décrit un échange proposé par le marchand.
+     * Si mobKey != null, acheter ce trade ajoute le mob à la file de spawn.
+     */
+    public record TradeEntry(
+        int id,
+        String label,
+        ItemStack cost,
+        String mobKey,        // null si ce n'est pas un trade de mob
+        ItemStack itemResult  // null si c'est un trade de mob
+    ) {}
 
     // ─── Cycle journalier ────────────────────────────────────────────────────
 
-    /**
-     * Appelé chaque tick serveur.
-     * Spawne un marchand si un nouveau jour a commencé pour ce joueur.
-     */
     public static void tickForPlayer(ServerPlayer player, ServerLevel level) {
-        UUID playerId = player.getUUID();
-        long currentDay = level.getGameTime() / 24000L;
-        long lastDay    = lastTraderDay.getOrDefault(playerId, -1L);
+        UUID playerId    = player.getUUID();
+        long currentDay  = level.getGameTime() / 24000L;
+        long lastDay     = lastTraderDay.getOrDefault(playerId, -1L);
 
         if (currentDay > lastDay) {
             lastTraderDay.put(playerId, currentDay);
-            spawnTraderForPlayer(player, level);
+            onNewDay(player, level);
         }
     }
 
-    /** Initialise le suivi journalier à la connexion d'un joueur. */
     public static void onPlayerLogin(ServerPlayer player, MinecraftServer server) {
-        UUID playerId = player.getUUID();
-        loadPendingMobs(playerId, server);
-        // lastTraderDay reste à -1 si non chargé → forcera un spawn dès le prochain tick
+        loadPendingMobs(player.getUUID(), server);
     }
 
-    /** Sauvegarde à la déconnexion. */
     public static void onPlayerLogout(UUID playerId, MinecraftServer server) {
         savePendingMobs(playerId, server);
-        activeTraders.remove(playerId);
         lastTraderDay.remove(playerId);
     }
 
-    // ─── Spawn du marchand ───────────────────────────────────────────────────
+    // ─── Nouveau jour ────────────────────────────────────────────────────────
 
-    private static void spawnTraderForPlayer(ServerPlayer player, ServerLevel level) {
+    private static void onNewDay(ServerPlayer player, ServerLevel level) {
         UUID playerId = player.getUUID();
+        int extLevel  = IslandExtensionManager.getLevel(playerId);
 
-        // 1. Supprimer l'ancien marchand s'il existe encore
-        UUID oldTraderId = activeTraders.get(playerId);
-        if (oldTraderId != null) {
-            net.minecraft.world.entity.Entity old = level.getEntity(oldTraderId);
-            if (old != null) old.discard();
-            managedTraderIds.remove(oldTraderId);
+        // Spawn les mobs commandés la veille
+        List<String> pending = pendingMobs.remove(playerId);
+        if (pending != null && !pending.isEmpty()) {
+            PlayerDataManager.PlayerOneBlockData data =
+                PlayerDataManager.getOrCreate(playerId, level.getServer());
+            for (String mobKey : pending) {
+                spawnMob(mobKey, level, data.blockPos);
+            }
+            savePendingMobs(playerId, level.getServer());
         }
 
-        PlayerDataManager.PlayerOneBlockData data =
-            PlayerDataManager.getOrCreate(playerId, level.getServer());
-        BlockPos islandPos = data.blockPos;
+        if (extLevel < 1) return;   // marchand pas encore disponible
 
-        // 2. Spawner les mobs commandés la veille
-        List<String> pending = pendingMobs.getOrDefault(playerId, List.of());
-        for (String mobKey : pending) {
-            spawnMob(mobKey, level, islandPos);
-        }
-        pendingMobs.remove(playerId);
-        savePendingMobs(playerId, level.getServer());
-
-        // 3. Lancer un feu d'artifice à la position de l'île
-        launchFirework(level, islandPos);
-
-        // 4. Spawner le villageois marchand
-        int extLevel = IslandExtensionManager.getLevel(playerId);
-        if (extLevel < 1) return;  // pas encore de marchand avant le niveau 1
-
-        Villager trader = new Villager(EntityType.VILLAGER, level,
-            VillagerType.PLAINS);
-        trader.setVillagerData(trader.getVillagerData()
-            .setProfession(VillagerProfession.CARTOGRAPHER)
-            .setLevel(5));
-
-        double spawnX = islandPos.getX() + 1.5;
-        double spawnY = islandPos.getY() + 1.0;
-        double spawnZ = islandPos.getZ() + 0.5;
-
-        trader.setPos(spawnX, spawnY, spawnZ);
-        trader.setPersistenceRequired(true);
-        trader.setCustomName(Component.literal("§6Marchand OneBlock"));
-        trader.setCustomNameVisible(true);
-        trader.setNoAi(true);   // reste immobile
-
-        // Remplace les trades par défaut
-        trader.setCustomOffers(buildTrades(extLevel));
-
-        level.addFreshEntity(trader);
-        UUID traderUUID = trader.getUUID();
-        activeTraders.put(playerId, traderUUID);
-        managedTraderIds.add(traderUUID);
-
+        // Annonce d'arrivée
+        player.sendSystemMessage(Component.literal(""));
         player.sendSystemMessage(Component.literal(
-            "§6✦ §eLe marchand est arrivé sur ton île ! §6✦"
+            "§6━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        player.sendSystemMessage(Component.literal(
+            "  §e✦ §6Le Marchand OneBlock est arrivé ! §e✦"));
+        player.sendSystemMessage(Component.literal(
+            "§6━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+
+        // Lien cliquable pour ouvrir le catalogue
+        MutableComponent link = Component.literal("  §a[► Voir les offres du jour]")
+            .withStyle(s -> s
+                .withClickEvent(new ClickEvent(
+                    ClickEvent.Action.RUN_COMMAND, "/trader"))
+                .withHoverEvent(new HoverEvent(
+                    HoverEvent.Action.SHOW_TEXT,
+                    Component.literal("§7Cliquez pour afficher le catalogue"))));
+
+        player.sendSystemMessage(link);
+        player.sendSystemMessage(Component.literal(
+            "§6━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        player.sendSystemMessage(Component.literal(""));
+    }
+
+    // ─── Ouverture du GUI inventaire (/trader) ───────────────────────────────
+
+    /**
+     * Ouvre un inventaire grand coffre (6 lignes) affichant les offres du marchand.
+     * Cliquer sur un item achète l'offre correspondante.
+     */
+    public static void openTraderGui(ServerPlayer player) {
+        UUID playerId = player.getUUID();
+        int extLevel  = IslandExtensionManager.getLevel(playerId);
+
+        if (extLevel < 1) {
+            player.sendSystemMessage(Component.literal(
+                "§cLe marchand n'est pas encore disponible (niveau d'extension 1 requis)."));
+            return;
+        }
+
+        List<TradeEntry> trades = buildTrades(extLevel);
+        SimpleContainer inv    = new SimpleContainer(TraderMenu.TRADER_SIZE);
+
+        // Remplissage : verre gris comme fond
+        ItemStack glass = new ItemStack(Items.GRAY_STAINED_GLASS_PANE);
+        glass.setHoverName(Component.literal("§8─────────────────"));
+        for (int i = 0; i < TraderMenu.TRADER_SIZE; i++) {
+            inv.setItem(i, glass.copy());
+        }
+
+        // Placement des offres (une par slot, dans l'ordre)
+        for (int i = 0; i < Math.min(trades.size(), TraderMenu.TRADER_SIZE); i++) {
+            inv.setItem(i, buildDisplayItem(trades.get(i)));
+        }
+
+        player.openMenu(new SimpleMenuProvider(
+            (id, playerInv, p) -> new TraderMenu(id, playerInv, inv, trades),
+            Component.literal("§6✦ Marchand OneBlock §6✦")
+        ));
+    }
+
+    /** Construit l'item d'affichage pour une offre dans le GUI. */
+    private static ItemStack buildDisplayItem(TradeEntry entry) {
+        ItemStack display = entry.mobKey() != null
+            ? new ItemStack(Items.EGG)           // mob → œuf comme placeholder
+            : entry.itemResult().copy();         // item → l'item lui-même
+
+        String costDesc = entry.cost().getCount() + "x "
+            + entry.cost().getItem().getDescription().getString();
+
+        String suffix = entry.mobKey() != null
+            ? "§8(livré demain)"
+            : "";
+
+        display.setHoverName(Component.literal(
+            "§e" + entry.label()
+            + " §8| §7Coût : §f" + costDesc
+            + (suffix.isEmpty() ? "" : "  " + suffix)
         ));
 
-        OneBlockMod.LOGGER.info("[OneBlock] Marchand spawné pour {} (ext. niveau {})", playerId, extLevel);
+        return display;
     }
 
-    // ─── Construction des trades ─────────────────────────────────────────────
+    // ─── Affichage du catalogue chat (/trader list) ──────────────────────────
 
-    private static MerchantOffers buildTrades(int level) {
-        MerchantOffers offers = new MerchantOffers();
+    public static void showCatalogue(ServerPlayer player) {
+        UUID playerId = player.getUUID();
+        int extLevel  = IslandExtensionManager.getLevel(playerId);
 
-        // ── Niveau 1+ ────────────────────────────────────────────────────────
+        if (extLevel < 1) {
+            player.sendSystemMessage(Component.literal(
+                "§cLe marchand n'est pas encore disponible (niveau d'extension 1 requis)."));
+            return;
+        }
+
+        List<TradeEntry> trades = buildTrades(extLevel);
+
+        player.sendSystemMessage(Component.literal(""));
+        player.sendSystemMessage(Component.literal(
+            "§6━━━━━━ §eCatalogue du Marchand §6━━━━━━"));
+
+        for (TradeEntry entry : trades) {
+            String costDesc = entry.cost().getCount() + "x "
+                + entry.cost().getItem().getDescription().getString();
+
+            MutableComponent line = Component.literal(
+                "§7#" + entry.id() + " §f" + entry.label()
+                + " §8(coût : §7" + costDesc + "§8)  ");
+
+            // Bouton [Acheter]
+            MutableComponent btn = Component.literal("§a[Acheter]")
+                .withStyle(s -> s
+                    .withClickEvent(new ClickEvent(
+                        ClickEvent.Action.RUN_COMMAND,
+                        "/trader buy " + entry.id()))
+                    .withHoverEvent(new HoverEvent(
+                        HoverEvent.Action.SHOW_TEXT,
+                        Component.literal("§7Donne §f" + costDesc
+                            + "\n§7Reçoit : §f" + entry.label()
+                            + (entry.mobKey() != null
+                                ? "\n§8(le mob spawn demain à l'arrivée du marchand)"
+                                : "")))));
+
+            player.sendSystemMessage(line.append(btn));
+        }
+
+        player.sendSystemMessage(Component.literal(
+            "§6━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        player.sendSystemMessage(Component.literal(""));
+    }
+
+    // ─── Achat (/trader buy <id>) ─────────────────────────────────────────────
+
+    public static void processBuy(ServerPlayer player, int tradeId) {
+        UUID playerId = player.getUUID();
+        int extLevel  = IslandExtensionManager.getLevel(playerId);
+        MinecraftServer server = player.getServer();
+        if (server == null) return;
+
+        if (extLevel < 1) {
+            player.sendSystemMessage(Component.literal("§cMarchand non disponible."));
+            return;
+        }
+
+        List<TradeEntry> trades = buildTrades(extLevel);
+        Optional<TradeEntry> opt = trades.stream()
+            .filter(t -> t.id() == tradeId)
+            .findFirst();
+
+        if (opt.isEmpty()) {
+            player.sendSystemMessage(Component.literal("§cOffre #" + tradeId + " introuvable."));
+            return;
+        }
+
+        TradeEntry entry = opt.get();
+
+        // Vérifie que le joueur a les items nécessaires
+        ItemStack cost = entry.cost();
+        if (!player.getInventory().contains(cost)) {
+            player.sendSystemMessage(Component.literal(
+                "§cTu n'as pas assez de §f"
+                + cost.getItem().getDescription().getString()
+                + " §c(x" + cost.getCount() + " requis)."));
+            return;
+        }
+
+        // Retire les items du coût
+        player.getInventory().clearOrCountMatchingItems(
+            s -> s.getItem() == cost.getItem(), cost.getCount(),
+            player.inventoryMenu.getCraftSlots());
+
+        // Traite le résultat
+        if (entry.mobKey() != null) {
+            // Mob → file d'attente
+            pendingMobs.computeIfAbsent(playerId, k -> new ArrayList<>())
+                .add(entry.mobKey());
+            savePendingMobs(playerId, server);
+            player.sendSystemMessage(Component.literal(
+                "§a✓ §f" + entry.label()
+                + " §7sera livré demain à l'arrivée du marchand."));
+        } else if (entry.itemResult() != null) {
+            // Item → donné immédiatement
+            player.getInventory().add(entry.itemResult().copy());
+            player.sendSystemMessage(Component.literal(
+                "§a✓ §fTu as reçu : §e" + entry.itemResult().getCount()
+                + "x " + entry.itemResult().getItem().getDescription().getString()));
+        }
+    }
+
+    // ─── Construction des trades par niveau ───────────────────────────────────
+
+    public static List<TradeEntry> buildTrades(int level) {
+        List<TradeEntry> list = new ArrayList<>();
+        int id = 1;
+
+        // Niveau 1+
         if (level >= 1) {
-            // Blocs utiles
-            offers.add(trade(stack(Items.DIRT, 10),   stack(Items.ICE, 4)));
-            offers.add(trade(stack(Items.DIRT, 15),   stack(Items.GRASS_BLOCK, 8)));
-            // Mobs
-            offers.add(mobTrade(stack(Items.DIRT, 15),    "minecraft:cow"));
-            offers.add(mobTrade(stack(Items.DIRT, 10),    "minecraft:sheep"));
-            offers.add(mobTrade(stack(Items.DIRT, 20),    "minecraft:pig"));
-            offers.add(mobTrade(stack(Items.DIRT, 25),    "minecraft:chicken"));
-            offers.add(mobTrade(stack(Items.GRAVEL, 8),   "minecraft:rabbit"));
+            list.add(mob(id++, "Vache",    stack(Items.DIRT, 15),   "minecraft:cow"));
+            list.add(mob(id++, "Mouton",   stack(Items.DIRT, 10),   "minecraft:sheep"));
+            list.add(mob(id++, "Cochon",   stack(Items.DIRT, 20),   "minecraft:pig"));
+            list.add(mob(id++, "Poulet",   stack(Items.DIRT, 25),   "minecraft:chicken"));
+            list.add(mob(id++, "Lapin",    stack(Items.GRAVEL, 8),  "minecraft:rabbit"));
+            list.add(item(id++, "Glace x4",        stack(Items.DIRT, 10),       stack(Items.ICE, 4)));
+            list.add(item(id++, "Herbe x8",        stack(Items.DIRT, 15),       stack(Items.GRASS_BLOCK, 8)));
         }
 
-        // ── Niveau 2+ ────────────────────────────────────────────────────────
+        // Niveau 2+
         if (level >= 2) {
-            offers.add(mobTrade(stack(Items.OAK_LOG, 5),   "minecraft:horse"));
-            offers.add(mobTrade(stack(Items.OAK_LOG, 3),   "minecraft:donkey"));
-            offers.add(mobTrade(stack(Items.OAK_LOG, 8),   "minecraft:fox"));
+            list.add(mob(id++, "Cheval",   stack(Items.OAK_LOG, 5), "minecraft:horse"));
+            list.add(mob(id++, "Âne",      stack(Items.OAK_LOG, 3), "minecraft:donkey"));
+            list.add(mob(id++, "Renard",   stack(Items.OAK_LOG, 8), "minecraft:fox"));
         }
 
-        // ── Niveau 3+ ────────────────────────────────────────────────────────
+        // Niveau 3+
         if (level >= 3) {
-            offers.add(mobTrade(stack(Items.COAL_ORE, 3),  "minecraft:cat"));
-            offers.add(trade(stack(Items.IRON_ORE, 5),     stack(Items.IRON_PICKAXE, 1)));
+            list.add(mob(id++, "Chat",     stack(Items.COAL_ORE, 3),  "minecraft:cat"));
+            list.add(item(id++, "Pioche en fer",   stack(Items.IRON_ORE, 5),    stack(Items.IRON_PICKAXE, 1)));
         }
 
-        // ── Niveau 4+ ────────────────────────────────────────────────────────
+        // Niveau 4+
         if (level >= 4) {
-            offers.add(mobTrade(stack(Items.OAK_LOG, 12),  "minecraft:cat"));
-            offers.add(trade(stack(Items.OAK_LOG, 15),     stack(Items.WHEAT_SEEDS, 16)));
+            list.add(item(id++, "Graines de blé x16", stack(Items.OAK_LOG, 15), stack(Items.WHEAT_SEEDS, 16)));
         }
 
-        // ── Niveau 5+ ────────────────────────────────────────────────────────
+        // Niveau 5+
         if (level >= 5) {
-            offers.add(mobTrade(stack(Items.ICE, 10),        "minecraft:polar_bear"));
-            offers.add(mobTrade(stack(Items.SNOW_BLOCK, 8),  "minecraft:wolf"));
+            list.add(mob(id++, "Ours polaire", stack(Items.ICE, 10),        "minecraft:polar_bear"));
+            list.add(mob(id++, "Loup",         stack(Items.SNOW_BLOCK, 8),  "minecraft:wolf"));
         }
 
-        // ── Niveau 6+ ────────────────────────────────────────────────────────
+        // Niveau 6+
         if (level >= 6) {
-            offers.add(mobTrade(stack(Items.PRISMARINE, 5),  "minecraft:turtle"));
-            offers.add(mobTrade(stack(Items.SPONGE, 3),      "minecraft:axolotl"));
-            offers.add(trade(stack(Items.SPRUCE_LOG, 15),    stack(Items.IRON_PICKAXE, 1)));
+            list.add(mob(id++, "Tortue",   stack(Items.PRISMARINE, 5), "minecraft:turtle"));
+            list.add(mob(id++, "Axolotl",  stack(Items.SPONGE, 3),     "minecraft:axolotl"));
+            list.add(item(id++, "Pioche en fer",  stack(Items.SPRUCE_LOG, 15), stack(Items.IRON_PICKAXE, 1)));
         }
 
-        // ── Niveau 7+ ────────────────────────────────────────────────────────
+        // Niveau 7+
         if (level >= 7) {
-            offers.add(mobTrade(stack(Items.JUNGLE_LOG, 5),  "minecraft:panda"));
-            offers.add(mobTrade(stack(Items.BAMBOO, 8),      "minecraft:parrot"));
-            offers.add(mobTrade(stack(Items.MELON, 3),       "minecraft:ocelot"));
-            offers.add(trade(stack(Items.CLAY, 10),          stack(Items.ENCHANTED_BOOK, 1)));
+            list.add(mob(id++, "Panda",     stack(Items.JUNGLE_LOG, 5), "minecraft:panda"));
+            list.add(mob(id++, "Perroquet", stack(Items.BAMBOO, 8),     "minecraft:parrot"));
+            list.add(mob(id++, "Ocelot",    stack(Items.MELON, 3),      "minecraft:ocelot"));
         }
 
-        // ── Niveau 8+ ────────────────────────────────────────────────────────
+        // Niveau 8+
         if (level >= 8) {
-            offers.add(mobTrade(stack(Items.LILY_PAD, 6),    "minecraft:frog"));
-            offers.add(mobTrade(stack(Items.MOSS_BLOCK, 10), "minecraft:bee"));
-            offers.add(trade(stack(Items.EMERALD_ORE, 2),    stack(Items.SADDLE, 1)));
+            list.add(mob(id++, "Grenouille", stack(Items.LILY_PAD, 6),    "minecraft:frog"));
+            list.add(mob(id++, "Abeille",    stack(Items.MOSS_BLOCK, 10), "minecraft:bee"));
+            list.add(item(id++, "Selle",     stack(Items.EMERALD_ORE, 2), stack(Items.SADDLE, 1)));
         }
 
-        // ── Niveau 9+ ────────────────────────────────────────────────────────
+        // Niveau 9+
         if (level >= 9) {
-            offers.add(mobTrade(stack(Items.IRON_BLOCK, 2),  "minecraft:llama"));
-            offers.add(mobTrade(stack(Items.GOLD_BLOCK, 2),  "minecraft:goat"));
+            list.add(mob(id++, "Lama",   stack(Items.IRON_BLOCK, 2),  "minecraft:llama"));
+            list.add(mob(id++, "Chèvre", stack(Items.GOLD_BLOCK, 2),  "minecraft:goat"));
         }
 
-        // ── Niveau 10+ ───────────────────────────────────────────────────────
+        // Niveau 10+
         if (level >= 10) {
-            offers.add(trade(stack(Items.NETHER_QUARTZ_ORE, 5), stack(Items.ENCHANTING_TABLE, 1)));
-            offers.add(trade(stack(Items.GOLD_BLOCK, 3),         stack(Items.GOLDEN_CHESTPLATE, 1)));
+            list.add(item(id++, "Table d'enchantement", stack(Items.NETHER_QUARTZ_ORE, 5), stack(Items.ENCHANTING_TABLE, 1)));
+            list.add(item(id++, "Plastron en or",        stack(Items.GOLD_BLOCK, 3),         stack(Items.GOLDEN_CHESTPLATE, 1)));
         }
 
-        // ── Niveau 11 ────────────────────────────────────────────────────────
+        // Niveau 11
         if (level >= 11) {
-            offers.add(trade(stack(Items.PURPUR_BLOCK, 3),   stack(Items.DIAMOND_SWORD, 1)));
-            offers.add(trade(stack(Items.DIAMOND_BLOCK, 1),  stack(Items.ELYTRA, 1)));
+            list.add(item(id++, "Épée en diamant", stack(Items.PURPUR_BLOCK, 3),  stack(Items.DIAMOND_SWORD, 1)));
+            list.add(item(id,   "Élytre",          stack(Items.DIAMOND_BLOCK, 1), stack(Items.ELYTRA, 1)));
         }
 
-        return offers;
+        return list;
     }
 
-    // ─── Enregistrement d'achat de mob ───────────────────────────────────────
+    // ─── Helpers trades ──────────────────────────────────────────────────────
 
-    /**
-     * Appelé quand un joueur achète un "bon de mob" auprès de notre marchand.
-     * Ajoute le mob à la file d'attente (il spawnera au prochain marchand).
-     */
-    public static void queueMobForPlayer(UUID playerId, String mobKey, MinecraftServer server) {
-        pendingMobs.computeIfAbsent(playerId, k -> new ArrayList<>()).add(mobKey);
-        savePendingMobs(playerId, server);
-        OneBlockMod.LOGGER.info("[OneBlock] Mob en attente pour {} : {}", playerId, mobKey);
+    private static TradeEntry mob(int id, String label, ItemStack cost, String mobKey) {
+        return new TradeEntry(id, label, cost, mobKey, null);
     }
 
-    /** Renvoie la mob key encodée dans un item "bon", ou null. */
-    public static String getMobKeyFromItem(ItemStack stack) {
-        if (stack.isEmpty() || stack.getItem() != Items.PAPER) return null;
-        CompoundTag tag = stack.getTag();
-        if (tag == null || !tag.contains("OneBlockMob")) return null;
-        return tag.getString("OneBlockMob");
-    }
-
-    // ─── Helpers de construction de trades ───────────────────────────────────
-
-    /** Trade simple : itemIn → itemOut, 1 utilisation, 0 xp. */
-    private static MerchantOffer trade(ItemStack in, ItemStack out) {
-        return new MerchantOffer(in, out, 1, 0, 1.0f);
-    }
-
-    /**
-     * Trade de mob : donne un item, reçoit un "bon de mob" (papier avec NBT).
-     * Le mob spawnera au prochain marchand.
-     */
-    @SuppressWarnings("deprecation")
-    private static MerchantOffer mobTrade(ItemStack cost, String mobKey) {
-        ItemStack ticket = new ItemStack(Items.PAPER);
-        ticket.setHoverName(Component.literal("§6Bon de livraison : §f" + mobDisplayName(mobKey)));
-
-        // Encode le mob key dans le tag NBT (API legacy encore disponible en 1.21.x Forge)
-        CompoundTag nbt = ticket.getOrCreateTag();
-        nbt.putString("OneBlockMob", mobKey);
-
-        return new MerchantOffer(cost, ticket, 1, 0, 1.0f);
+    private static TradeEntry item(int id, String label, ItemStack cost, ItemStack result) {
+        return new TradeEntry(id, label, cost, null, result);
     }
 
     private static ItemStack stack(net.minecraft.world.item.Item item, int count) {
         return new ItemStack(item, count);
-    }
-
-    private static String mobDisplayName(String mobKey) {
-        // Ex: "minecraft:cow" → "Cow"
-        String name = mobKey.contains(":") ? mobKey.split(":")[1] : mobKey;
-        return name.substring(0, 1).toUpperCase() + name.replace("_", " ").substring(1);
     }
 
     // ─── Spawn de mobs ────────────────────────────────────────────────────────
@@ -291,49 +392,24 @@ public class TraderManager {
         try {
             Optional<EntityType<?>> typeOpt = EntityType.byString(mobKey);
             if (typeOpt.isEmpty()) {
-                OneBlockMod.LOGGER.warn("[OneBlock] Type de mob inconnu : {}", mobKey);
+                OneBlockMod.LOGGER.warn("[OneBlock] Mob inconnu : {}", mobKey);
                 return;
             }
             net.minecraft.world.entity.Entity mob = typeOpt.get().create(level);
             if (mob == null) return;
 
             double x = nearPos.getX() + (Math.random() * 4 - 2);
-            double y = nearPos.getY() + 1.0;
             double z = nearPos.getZ() + (Math.random() * 4 - 2);
-            mob.setPos(x, y, z);
-
+            mob.setPos(x, nearPos.getY() + 1.0, z);
             level.addFreshEntity(mob);
+
+            OneBlockMod.LOGGER.info("[OneBlock] Mob spawné : {}", mobKey);
         } catch (Exception e) {
             OneBlockMod.LOGGER.error("[OneBlock] Erreur spawn mob {}: {}", mobKey, e.getMessage());
         }
     }
 
-    // ─── Feu d'artifice ──────────────────────────────────────────────────────
-
-    private static void launchFirework(ServerLevel level, BlockPos pos) {
-        ItemStack fireworkItem = new ItemStack(Items.FIREWORK_ROCKET);
-        CompoundTag itemTag  = fireworkItem.getOrCreateTag();
-        CompoundTag fireworks = new CompoundTag();
-        fireworks.putByte("Flight", (byte) 1);
-
-        ListTag explosions = new ListTag();
-        CompoundTag explosion = new CompoundTag();
-        explosion.putByte("Type", (byte) 0);
-        explosion.putIntArray("Colors", new int[]{0xFFD700, 0xFF8C00});  // or, orange
-        explosions.add(explosion);
-        fireworks.put("Explosions", explosions);
-        itemTag.put("Fireworks", fireworks);
-
-        net.minecraft.world.entity.projectile.FireworkRocketEntity firework =
-            new net.minecraft.world.entity.projectile.FireworkRocketEntity(
-                level,
-                pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5,
-                fireworkItem
-            );
-        level.addFreshEntity(firework);
-    }
-
-    // ─── Persistence mobs en attente ─────────────────────────────────────────
+    // ─── Persistence ─────────────────────────────────────────────────────────
 
     private static void savePendingMobs(UUID playerId, MinecraftServer server) {
         try {
@@ -348,7 +424,7 @@ public class TraderManager {
             tag.put("PendingMobs", list);
             NbtIo.writeCompressed(tag, path);
         } catch (IOException e) {
-            OneBlockMod.LOGGER.error("[OneBlock] Erreur sauvegarde mobs en attente {}: {}", playerId, e.getMessage());
+            OneBlockMod.LOGGER.error("[OneBlock] Erreur sauvegarde pending mobs {}: {}", playerId, e.getMessage());
         }
     }
 
@@ -357,14 +433,12 @@ public class TraderManager {
             Path path = getSaveDir(server).toPath().resolve(playerId + "_pending.dat");
             if (!path.toFile().exists()) return;
             CompoundTag tag = NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
-            ListTag list = tag.getList("PendingMobs", 8); // 8 = StringTag
+            ListTag list = tag.getList("PendingMobs", 8);
             List<String> mobs = new ArrayList<>();
-            for (int i = 0; i < list.size(); i++) {
-                mobs.add(list.getString(i));
-            }
+            for (int i = 0; i < list.size(); i++) mobs.add(list.getString(i));
             if (!mobs.isEmpty()) pendingMobs.put(playerId, mobs);
         } catch (IOException e) {
-            OneBlockMod.LOGGER.error("[OneBlock] Erreur chargement mobs en attente {}: {}", playerId, e.getMessage());
+            OneBlockMod.LOGGER.error("[OneBlock] Erreur chargement pending mobs {}: {}", playerId, e.getMessage());
         }
     }
 
