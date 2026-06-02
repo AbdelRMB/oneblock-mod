@@ -117,17 +117,23 @@ public class PlayerEventHandler {
         if (!OneBlockWorldGen.isOneBlock(brokenPos, data)) return;
 
         ServerLevel level = (ServerLevel) event.getLevel();
-        PhaseChangeResult result = PlayerDataManager.incrementBlocksBroken(playerId, server);
 
+        // Impulsion vers le haut : le joueur monte légèrement au moment du break
+        // → quand le bloc régénère au tick suivant, le joueur est au-dessus
+        //   et ne se retrouve plus à l'intérieur (évite le push et la chute).
+        net.minecraft.world.phys.Vec3 motion = player.getDeltaMovement();
+        player.setDeltaMovement(motion.x, Math.max(motion.y, 0.2), motion.z);
+
+        // Incrémente la progression
+        PhaseChangeResult result = PlayerDataManager.incrementBlocksBroken(playerId, server);
         if (result.changed) {
             OneBlockWorldGen.notifyPhaseChange(player, result.oldPhase, result.newPhase);
         }
 
-        // Met à jour la boss bar avec les nouvelles données
+        // Régénère le bloc au tick suivant (vanilla gère le break et les drops normalement)
         PlayerOneBlockData freshData = PlayerDataManager.getOrCreate(playerId, server);
         updateBossBar(player, freshData);
 
-        // Régénère le bloc au tick suivant
         nextTickTasks.add(() -> {
             PlayerOneBlockData updatedData = PlayerDataManager.getOrCreate(playerId, server);
             OneBlockWorldGen.regenerateBlock(level, brokenPos, updatedData);
