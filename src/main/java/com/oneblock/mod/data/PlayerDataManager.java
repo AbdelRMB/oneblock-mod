@@ -17,30 +17,87 @@ import java.util.UUID;
 
 public class PlayerDataManager {
 
-    public static final int ISLAND_SPACING = 200;
-    public static final int BLOCK_Y = 64;
+    /**
+     * Distance entre deux îles.
+     * 2000 blocs = safe même à render distance 32 chunks (512 blocs max de visibilité).
+     * Îles disposées sur l'axe X : île 0 → X=0, île 1 → X=2000, île 2 → X=4000...
+     */
+    public static final int ISLAND_SPACING = 2000;
+    public static final int BLOCK_Y        = 64;
 
     private static final Map<UUID, PlayerOneBlockData> playerData = new HashMap<>();
-    private static int islandCounter = 0;
+
+    /**
+     * Compteur global persisté dans global.dat (indépendant des fichiers joueurs).
+     * -1 signifie "pas encore chargé depuis le disque".
+     */
+    private static int islandCounter = -1;
+
+    // ─── Accès principal ────────────────────────────────────────────────────
 
     public static PlayerOneBlockData getOrCreate(UUID playerId, MinecraftServer server) {
+        ensureCounterLoaded(server);
+
         if (!playerData.containsKey(playerId)) {
             PlayerOneBlockData data = loadFromDisk(playerId, server);
             if (data == null) {
+                // Nouveau joueur → lui attribuer la prochaine île libre
                 BlockPos islandPos = calculateNextIslandPos();
                 data = new PlayerOneBlockData(playerId, islandPos, 0);
                 islandCounter++;
-                OneBlockMod.LOGGER.info("[OneBlock] Nouvelle île créée pour {} en {}", playerId, islandPos);
+                saveGlobalCounter(server);
+                OneBlockMod.LOGGER.info("[OneBlock] Île #{} créée pour {} → X={}",
+                    islandCounter - 1, playerId, islandPos.getX());
             }
             playerData.put(playerId, data);
         }
         return playerData.get(playerId);
     }
 
+    // ─── Calcul de position ─────────────────────────────────────────────────
+
     private static BlockPos calculateNextIslandPos() {
-        int x = islandCounter * ISLAND_SPACING;
-        return new BlockPos(x, BLOCK_Y, 0);
+        return new BlockPos(islandCounter * ISLAND_SPACING, BLOCK_Y, 0);
     }
+
+    // ─── Compteur global (global.dat) ───────────────────────────────────────
+
+    /**
+     * Charge le compteur depuis global.dat une seule fois par session serveur.
+     * Garantit qu'aucune île n'est assignée deux fois, même après redémarrage.
+     */
+    private static void ensureCounterLoaded(MinecraftServer server) {
+        if (islandCounter >= 0) return;
+        try {
+            Path globalFile = getSaveDir(server).toPath().resolve("global.dat");
+            if (globalFile.toFile().exists()) {
+                CompoundTag tag = NbtIo.readCompressed(globalFile, NbtAccounter.unlimitedHeap());
+                islandCounter = tag.getInt("IslandCounter").orElse(0);
+                OneBlockMod.LOGGER.info("[OneBlock] Compteur global chargé : {} île(s) existante(s)", islandCounter);
+            } else {
+                islandCounter = 0;
+                OneBlockMod.LOGGER.info("[OneBlock] Nouveau serveur — compteur initialisé à 0");
+            }
+        } catch (IOException e) {
+            OneBlockMod.LOGGER.error("[OneBlock] Erreur lecture global.dat : {}", e.getMessage());
+            islandCounter = 0;
+        }
+    }
+
+    private static void saveGlobalCounter(MinecraftServer server) {
+        try {
+            File saveDir = getSaveDir(server);
+            saveDir.mkdirs();
+            Path globalFile = saveDir.toPath().resolve("global.dat");
+            CompoundTag tag = new CompoundTag();
+            tag.putInt("IslandCounter", islandCounter);
+            NbtIo.writeCompressed(tag, globalFile);
+        } catch (IOException e) {
+            OneBlockMod.LOGGER.error("[OneBlock] Erreur sauvegarde global.dat : {}", e.getMessage());
+        }
+    }
+
+    // ─── Progression ────────────────────────────────────────────────────────
 
     public static PhaseChangeResult incrementBlocksBroken(UUID playerId, MinecraftServer server) {
         PlayerOneBlockData data = getOrCreate(playerId, server);
@@ -51,6 +108,8 @@ public class PlayerDataManager {
         boolean phaseChanged = oldPhase != newPhase;
         return new PhaseChangeResult(phaseChanged, oldPhase, newPhase, data.blocksBroken);
     }
+
+    // ─── Persistence joueur ─────────────────────────────────────────────────
 
     public static void saveToDisk(PlayerOneBlockData data, MinecraftServer server) {
         try {
@@ -63,7 +122,6 @@ public class PlayerDataManager {
             tag.putInt("BlockX", data.blockPos.getX());
             tag.putInt("BlockY", data.blockPos.getY());
             tag.putInt("BlockZ", data.blockPos.getZ());
-            tag.putInt("IslandIndex", islandCounter);
 
             NbtIo.writeCompressed(tag, filePath);
         } catch (IOException e) {
@@ -81,12 +139,8 @@ public class PlayerDataManager {
             int x = tag.getInt("BlockX").orElse(0);
             int y = tag.getInt("BlockY").orElse(BLOCK_Y);
             int z = tag.getInt("BlockZ").orElse(0);
-            tag.getInt("IslandIndex").ifPresent(idx ->
-                islandCounter = Math.max(islandCounter, idx)
-            );
 
-            BlockPos pos = new BlockPos(x, y, z);
-            return new PlayerOneBlockData(playerId, pos, blocksBroken);
+            return new PlayerOneBlockData(playerId, new BlockPos(x, y, z), blocksBroken);
 
         } catch (IOException e) {
             OneBlockMod.LOGGER.error("[OneBlock] Erreur chargement {}: {}", playerId, e.getMessage());
@@ -100,8 +154,10 @@ public class PlayerDataManager {
 
     public static void clearCache() {
         playerData.clear();
-        islandCounter = 0;
+        islandCounter = -1;  // force le rechargement depuis global.dat à la prochaine utilisation
     }
+
+    // ─── Classes internes ───────────────────────────────────────────────────
 
     public static class PlayerOneBlockData {
         public final UUID playerId;
