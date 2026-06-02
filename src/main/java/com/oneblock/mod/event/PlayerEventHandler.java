@@ -5,6 +5,8 @@ import com.oneblock.mod.config.OneBlockConfig;
 import com.oneblock.mod.data.PlayerDataManager;
 import com.oneblock.mod.data.PlayerDataManager.PlayerOneBlockData;
 import com.oneblock.mod.data.PlayerDataManager.PhaseChangeResult;
+import com.oneblock.mod.network.OneBlockNetwork;
+import com.oneblock.mod.network.SyncProgressPacket;
 import com.oneblock.mod.world.OneBlockWorldGen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
@@ -18,6 +20,7 @@ import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.listener.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.network.PacketDistributor;
 
 import java.nio.file.Path;
 import java.util.Queue;
@@ -88,12 +91,8 @@ public class PlayerEventHandler {
                     true
                 );
 
-                int blocksLeft = data.getBlocksUntilNextPhase();
-                String nextInfo = blocksLeft > 0 ? " §7| §f" + blocksLeft + " §7blocs jusqu'au prochain niveau" : "";
-                player.sendSystemMessage(
-                    Component.literal("§7Re-bienvenue ! §f" + data.getCurrentPhase().displayName
-                        + " §7| Blocs cassés : §f" + data.blocksBroken + nextInfo)
-                );
+                // Restaure la barre de progression HUD au reconnect
+                sendProgressPacket(player, data);
             }
         });
 
@@ -122,13 +121,9 @@ public class PlayerEventHandler {
             OneBlockWorldGen.notifyPhaseChange(player, result.oldPhase, result.newPhase);
         }
 
+        // Met à jour la barre de progression HUD
         PlayerOneBlockData freshData = PlayerDataManager.getOrCreate(playerId, server);
-        int blocksLeft = freshData.getBlocksUntilNextPhase();
-        String nextInfo = blocksLeft > 0 ? " §7| §f" + blocksLeft + " §7avant niveau " + (freshData.getCurrentPhase().ordinal() + 1) : "";
-        player.sendSystemMessage(
-            Component.literal("§7" + freshData.getCurrentPhase().displayName
-                + " §7| Blocs cassés : §f" + result.totalBroken + nextInfo)
-        );
+        sendProgressPacket(player, freshData);
 
         // Planifie la régénération au tick suivant (après que Minecraft ait fini de casser le bloc)
         nextTickTasks.add(() -> {
@@ -176,6 +171,16 @@ public class PlayerEventHandler {
         PlayerDataManager.saveToDisk(data, server);
 
         OneBlockMod.LOGGER.info("[OneBlock] Données sauvegardées pour {}", player.getName().getString());
+    }
+
+    /** Envoie un paquet de synchronisation HUD au joueur. */
+    private static void sendProgressPacket(ServerPlayer player, PlayerOneBlockData data) {
+        int blocksUntilNext = data.getBlocksUntilNextPhase();
+        float progress = data.getCurrentPhase().getProgress(data.blocksBroken);
+        OneBlockNetwork.CHANNEL.send(
+            new SyncProgressPacket(data.blocksBroken, blocksUntilNext, data.getCurrentPhase().displayName, progress),
+            PacketDistributor.PLAYER.with(player)
+        );
     }
 
     private static boolean hasExistingData(UUID playerId, MinecraftServer server) {
