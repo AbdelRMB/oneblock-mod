@@ -88,9 +88,11 @@ public class PlayerEventHandler {
                     true
                 );
 
+                int blocksLeft = data.getBlocksUntilNextPhase();
+                String nextInfo = blocksLeft > 0 ? " §7| §f" + blocksLeft + " §7blocs jusqu'au prochain niveau" : "";
                 player.sendSystemMessage(
-                    Component.literal("§7Re-bienvenue ! §fPhase : " + data.getCurrentPhase().displayName
-                        + " §7| Blocs cassés : §f" + data.blocksBroken)
+                    Component.literal("§7Re-bienvenue ! §f" + data.getCurrentPhase().displayName
+                        + " §7| Blocs cassés : §f" + data.blocksBroken + nextInfo)
                 );
             }
         });
@@ -120,8 +122,12 @@ public class PlayerEventHandler {
             OneBlockWorldGen.notifyPhaseChange(player, result.oldPhase, result.newPhase);
         }
 
+        PlayerOneBlockData freshData = PlayerDataManager.getOrCreate(playerId, server);
+        int blocksLeft = freshData.getBlocksUntilNextPhase();
+        String nextInfo = blocksLeft > 0 ? " §7| §f" + blocksLeft + " §7avant niveau " + (freshData.getCurrentPhase().ordinal() + 1) : "";
         player.sendSystemMessage(
-            Component.literal("§7Blocs cassés : §f" + result.totalBroken)
+            Component.literal("§7" + freshData.getCurrentPhase().displayName
+                + " §7| Blocs cassés : §f" + result.totalBroken + nextInfo)
         );
 
         // Planifie la régénération au tick suivant (après que Minecraft ait fini de casser le bloc)
