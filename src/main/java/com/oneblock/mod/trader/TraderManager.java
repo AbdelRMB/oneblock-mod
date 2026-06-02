@@ -10,12 +10,13 @@ import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
-import net.minecraft.world.entity.npc.WanderingTrader;
+import net.minecraft.world.entity.npc.Villager;
+import net.minecraft.world.entity.npc.VillagerProfession;
+import net.minecraft.world.entity.npc.VillagerType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.trading.MerchantOffer;
@@ -114,27 +115,29 @@ public class TraderManager {
         int extLevel = IslandExtensionManager.getLevel(playerId);
         if (extLevel < 1) return;  // pas encore de marchand avant le niveau 1
 
-        WanderingTrader trader = EntityType.WANDERING_TRADER.create(level);
-        if (trader == null) return;
+        Villager trader = new Villager(EntityType.VILLAGER, level,
+            VillagerType.PLAINS);
+        trader.setVillagerData(trader.getVillagerData()
+            .setProfession(VillagerProfession.CARTOGRAPHER)
+            .setLevel(5));
 
         double spawnX = islandPos.getX() + 1.5;
         double spawnY = islandPos.getY() + 1.0;
         double spawnZ = islandPos.getZ() + 0.5;
 
         trader.setPos(spawnX, spawnY, spawnZ);
-        trader.setPersistenceRequired(true);   // ne despawn pas
-        trader.setDespawnDelay(Integer.MAX_VALUE);
+        trader.setPersistenceRequired(true);
         trader.setCustomName(Component.literal("§6Marchand OneBlock"));
         trader.setCustomNameVisible(true);
+        trader.setNoAi(true);   // reste immobile
 
         // Remplace les trades par défaut
-        MerchantOffers offers = trader.getOffers();
-        offers.clear();
-        offers.addAll(buildTrades(extLevel));
+        trader.setCustomOffers(buildTrades(extLevel));
 
         level.addFreshEntity(trader);
-        activeTraders.put(playerId, trader.getUUID());
-        managedTraderIds.add(trader.getUUID());
+        UUID traderUUID = trader.getUUID();
+        activeTraders.put(playerId, traderUUID);
+        managedTraderIds.add(traderUUID);
 
         player.sendSystemMessage(Component.literal(
             "§6✦ §eLe marchand est arrivé sur ton île ! §6✦"
@@ -286,7 +289,6 @@ public class TraderManager {
 
     private static void spawnMob(String mobKey, ServerLevel level, BlockPos nearPos) {
         try {
-            ResourceLocation rl = ResourceLocation.parse(mobKey);
             Optional<EntityType<?>> typeOpt = EntityType.byString(mobKey);
             if (typeOpt.isEmpty()) {
                 OneBlockMod.LOGGER.warn("[OneBlock] Type de mob inconnu : {}", mobKey);
