@@ -20,6 +20,7 @@ import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.levelgen.Heightmap;
 
 import java.io.File;
 import java.io.IOException;
@@ -210,55 +211,97 @@ public class TraderManager {
         int id = 1;
 
         if (level >= 1) {
-            list.add(mob(id++, "Vache",       stack(Items.DIRT, 15),   "minecraft:cow"));
-            list.add(mob(id++, "Mouton",      stack(Items.DIRT, 10),   "minecraft:sheep"));
-            list.add(mob(id++, "Cochon",      stack(Items.DIRT, 20),   "minecraft:pig"));
-            list.add(mob(id++, "Poulet",      stack(Items.DIRT, 25),   "minecraft:chicken"));
-            list.add(mob(id++, "Lapin",       stack(Items.GRAVEL, 8),  "minecraft:rabbit"));
-            list.add(item(id++, "Glace x4",   stack(Items.DIRT, 10),   stack(Items.ICE, 4)));
-            list.add(item(id++, "Herbe x8",   stack(Items.DIRT, 15),   stack(Items.GRASS_BLOCK, 8)));
+            // Mobs
+            list.add(mob(id++, "Vache",         stack(Items.DIRT, 15),   "minecraft:cow"));
+            list.add(mob(id++, "Mouton",        stack(Items.DIRT, 10),   "minecraft:sheep"));
+            list.add(mob(id++, "Cochon",        stack(Items.DIRT, 20),   "minecraft:pig"));
+            list.add(mob(id++, "Poulet",        stack(Items.DIRT, 25),   "minecraft:chicken"));
+            list.add(mob(id++, "Lapin",         stack(Items.GRAVEL, 8),  "minecraft:rabbit"));
+            // Blocs
+            list.add(item(id++, "Glace x4",     stack(Items.DIRT, 10),   stack(Items.ICE, 4)));
+            list.add(item(id++, "Herbe x8",     stack(Items.DIRT, 15),   stack(Items.GRASS_BLOCK, 8)));
+            // Cultures
+            list.add(item(id++, "Graines ble x16",  stack(Items.DIRT, 5),    stack(Items.WHEAT_SEEDS, 16)));
+            list.add(item(id++, "Carotte x8",        stack(Items.DIRT, 8),    stack(Items.CARROT, 8)));
+            list.add(item(id++, "Pomme de terre x8", stack(Items.DIRT, 8),    stack(Items.POTATO, 8)));
         }
         if (level >= 2) {
-            list.add(mob(id++, "Cheval",      stack(Items.OAK_LOG, 5), "minecraft:horse"));
-            list.add(mob(id++, "Ane",         stack(Items.OAK_LOG, 3), "minecraft:donkey"));
-            list.add(mob(id++, "Renard",      stack(Items.OAK_LOG, 8), "minecraft:fox"));
+            // Mobs
+            list.add(mob(id++, "Cheval",        stack(Items.OAK_LOG, 5), "minecraft:horse"));
+            list.add(mob(id++, "Ane",           stack(Items.OAK_LOG, 3), "minecraft:donkey"));
+            list.add(mob(id++, "Renard",        stack(Items.OAK_LOG, 8), "minecraft:fox"));
+            // Cultures
+            list.add(item(id++, "Graines betterave x8", stack(Items.DIRT, 6),    stack(Items.BEETROOT_SEEDS, 8)));
+            list.add(item(id++, "Graines melon x4",     stack(Items.OAK_LOG, 3), stack(Items.MELON_SEEDS, 4)));
+            list.add(item(id++, "Graines citrouille x4",stack(Items.OAK_LOG, 3), stack(Items.PUMPKIN_SEEDS, 4)));
         }
         if (level >= 3) {
-            list.add(mob(id++, "Chat",        stack(Items.COAL_ORE, 3),  "minecraft:cat"));
-            list.add(item(id++, "Pioche fer", stack(Items.IRON_ORE, 5),  stack(Items.IRON_PICKAXE, 1)));
+            // Mobs
+            list.add(mob(id++, "Chat",          stack(Items.COAL_ORE, 3),  "minecraft:cat"));
+            // Outils
+            list.add(item(id++, "Pioche fer",   stack(Items.IRON_ORE, 5),  stack(Items.IRON_PICKAXE, 1)));
+            // Cultures
+            list.add(item(id++, "Canne a sucre x8", stack(Items.SAND, 5),     stack(Items.SUGAR_CANE, 8)));
         }
         if (level >= 4) {
-            list.add(item(id++, "Graines x16", stack(Items.OAK_LOG, 15), stack(Items.WHEAT_SEEDS, 16)));
+            list.add(item(id++, "Graines ble x32",  stack(Items.OAK_LOG, 10), stack(Items.WHEAT_SEEDS, 32)));
         }
         if (level >= 5) {
-            list.add(mob(id++, "Ours polaire", stack(Items.ICE, 10),       "minecraft:polar_bear"));
-            list.add(mob(id++, "Loup",         stack(Items.SNOW_BLOCK, 8), "minecraft:wolf"));
+            // Mobs
+            list.add(mob(id++, "Ours polaire",  stack(Items.ICE, 10),        "minecraft:polar_bear"));
+            list.add(mob(id++, "Loup",          stack(Items.SNOW_BLOCK, 8),  "minecraft:wolf"));
+            // Cultures
+            list.add(item(id++, "Baies douces x8",  stack(Items.SNOW_BLOCK, 4), stack(Items.SWEET_BERRIES, 8)));
         }
         if (level >= 6) {
-            list.add(mob(id++, "Tortue",      stack(Items.PRISMARINE, 5),  "minecraft:turtle"));
-            list.add(mob(id++, "Axolotl",     stack(Items.SPONGE, 3),      "minecraft:axolotl"));
+            // Mobs
+            list.add(mob(id++, "Tortue",        stack(Items.PRISMARINE, 5),  "minecraft:turtle"));
+            list.add(mob(id++, "Axolotl",       stack(Items.SPONGE, 3),      "minecraft:axolotl"));
+            // Cultures
+            list.add(item(id++, "Kelp x16",     stack(Items.SAND, 8),        stack(Items.KELP, 16)));
         }
         if (level >= 7) {
-            list.add(mob(id++, "Panda",       stack(Items.JUNGLE_LOG, 5),  "minecraft:panda"));
-            list.add(mob(id++, "Perroquet",   stack(Items.BAMBOO, 8),      "minecraft:parrot"));
-            list.add(mob(id++, "Ocelot",      stack(Items.MELON, 3),       "minecraft:ocelot"));
+            // Mobs
+            list.add(mob(id++, "Panda",         stack(Items.JUNGLE_LOG, 5),  "minecraft:panda"));
+            list.add(mob(id++, "Perroquet",     stack(Items.BAMBOO, 8),      "minecraft:parrot"));
+            list.add(mob(id++, "Ocelot",        stack(Items.MELON, 3),       "minecraft:ocelot"));
+            // Cultures
+            list.add(item(id++, "Cacao x8",     stack(Items.JUNGLE_LOG, 4),  stack(Items.COCOA_BEANS, 8)));
+            list.add(item(id++, "Bambou x16",   stack(Items.JUNGLE_LOG, 3),  stack(Items.BAMBOO, 16)));
         }
         if (level >= 8) {
-            list.add(mob(id++, "Grenouille",  stack(Items.LILY_PAD, 6),    "minecraft:frog"));
-            list.add(mob(id++, "Abeille",     stack(Items.MOSS_BLOCK, 10), "minecraft:bee"));
-            list.add(item(id++, "Selle",      stack(Items.EMERALD_ORE, 2), stack(Items.SADDLE, 1)));
+            // Mobs
+            list.add(mob(id++, "Grenouille",    stack(Items.LILY_PAD, 6),    "minecraft:frog"));
+            list.add(mob(id++, "Abeille",       stack(Items.MOSS_BLOCK, 10), "minecraft:bee"));
+            // Divers
+            list.add(item(id++, "Selle",        stack(Items.EMERALD_ORE, 2), stack(Items.SADDLE, 1)));
+            // Cultures (champignons)
+            list.add(item(id++, "Champ. rouge x4",  stack(Items.CLAY, 4),    stack(Items.RED_MUSHROOM, 4)));
+            list.add(item(id++, "Champ. brun x4",   stack(Items.CLAY, 4),    stack(Items.BROWN_MUSHROOM, 4)));
         }
         if (level >= 9) {
-            list.add(mob(id++, "Lama",        stack(Items.IRON_BLOCK, 2),  "minecraft:llama"));
-            list.add(mob(id++, "Chevre",      stack(Items.GOLD_BLOCK, 2),  "minecraft:goat"));
+            // Mobs
+            list.add(mob(id++, "Lama",          stack(Items.IRON_BLOCK, 2),  "minecraft:llama"));
+            list.add(mob(id++, "Chevre",        stack(Items.GOLD_BLOCK, 2),  "minecraft:goat"));
         }
         if (level >= 10) {
+            // Outils & équipement
             list.add(item(id++, "Table enchant.", stack(Items.NETHER_QUARTZ_ORE, 5), stack(Items.ENCHANTING_TABLE, 1)));
             list.add(item(id++, "Plastron or",    stack(Items.GOLD_BLOCK, 3),         stack(Items.GOLDEN_CHESTPLATE, 1)));
+            // Cultures Nether
+            list.add(item(id++, "Verrue du Nether x8",  stack(Items.SOUL_SAND, 4),    stack(Items.NETHER_WART, 8)));
+            list.add(item(id++, "Champignon ecarlate",  stack(Items.NETHERRACK, 6),   stack(Items.CRIMSON_FUNGUS, 4)));
+            list.add(item(id++, "Champignon distordu",  stack(Items.NETHERRACK, 6),   stack(Items.WARPED_FUNGUS, 4)));
+            // Lave
+            list.add(item(id++, "Seau de lave",   stack(Items.NETHERRACK, 8),  stack(Items.LAVA_BUCKET, 1)));
         }
         if (level >= 11) {
-            list.add(item(id++, "Epee diamant", stack(Items.PURPUR_BLOCK, 3),   stack(Items.DIAMOND_SWORD, 1)));
-            list.add(item(id,   "Elytre",        stack(Items.DIAMOND_BLOCK, 1), stack(Items.ELYTRA, 1)));
+            list.add(item(id++, "Epee diamant",   stack(Items.PURPUR_BLOCK, 3),   stack(Items.DIAMOND_SWORD, 1)));
+            list.add(item(id++, "Elytre",          stack(Items.DIAMOND_BLOCK, 1), stack(Items.ELYTRA, 1)));
+            // Cultures End
+            list.add(item(id++, "Fleur de chorus x4", stack(Items.END_STONE, 5), stack(Items.CHORUS_FLOWER, 4)));
+            // Lave extra
+            list.add(item(id,   "Seau de lave x2",    stack(Items.PURPUR_BLOCK, 4), stack(Items.LAVA_BUCKET, 2)));
         }
 
         return list;
@@ -285,12 +328,17 @@ public class TraderManager {
                 typeOpt.get().create(level, EntitySpawnReason.NATURAL);
             if (mob == null) return;
 
-            mob.setPos(
-                nearPos.getX() + (Math.random() * 4 - 2),
-                nearPos.getY() + 1.0,
-                nearPos.getZ() + (Math.random() * 4 - 2)
-            );
+            // Choisit une position aléatoire autour du bloc central
+            int spawnX = nearPos.getX() + (int)(Math.random() * 6 - 3);
+            int spawnZ = nearPos.getZ() + (int)(Math.random() * 6 - 3);
+
+            // Trouve le bloc le plus haut à cet endroit (ignore les feuilles)
+            // → le mob spawn sur le sol réel, pas à l'intérieur des constructions
+            int topY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, spawnX, spawnZ);
+
+            mob.setPos(spawnX + 0.5, topY + 0.1, spawnZ + 0.5);
             level.addFreshEntity(mob);
+            OneBlockMod.LOGGER.info("[OneBlock] Mob {} spawné en ({},{},{})", mobKey, spawnX, topY, spawnZ);
         } catch (Exception e) {
             OneBlockMod.LOGGER.error("[OneBlock] Erreur spawn mob {}: {}", mobKey, e.getMessage());
         }
