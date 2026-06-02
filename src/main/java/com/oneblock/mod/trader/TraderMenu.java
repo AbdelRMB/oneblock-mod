@@ -50,11 +50,13 @@ public class TraderMenu extends AbstractContainerMenu {
 
                     @Override
                     public void onTake(Player player, ItemStack stack) {
+                        // Vide le stack AVANT tout — empêche le jeu de le donner au joueur
+                        stack.setCount(0);
                         // Traite l'achat côté serveur
                         if (player instanceof ServerPlayer sp) {
                             TraderManager.processBuy(sp, trades.get(index).id());
                         }
-                        // Remet l'item en place (le joueur ne garde rien)
+                        // Remet l'item d'affichage en place
                         traderInv.setItem(index,
                             TraderManager.buildDisplayItemPublic(trades.get(index)));
                     }
