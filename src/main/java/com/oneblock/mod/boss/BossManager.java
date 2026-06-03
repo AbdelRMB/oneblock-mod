@@ -96,6 +96,10 @@ public class BossManager {
         return bossEntityId.equals(activeBossEntity.get(playerId));
     }
 
+    public static boolean isInActiveFight(UUID id) {
+        return activeFights.containsKey(id);
+    }
+
     /** Appelé lors d'une transition de phase majeure. Démarre le combat. */
     public static void onMajorPhaseTransition(ServerPlayer player, ServerLevel level,
                                                OneBlockPhase oldPhase, OneBlockPhase newPhase) {
@@ -152,7 +156,11 @@ public class BossManager {
         player.setItemSlot(EquipmentSlot.LEGS,  new ItemStack(Items.DIAMOND_LEGGINGS));
         player.setItemSlot(EquipmentSlot.FEET,  new ItemStack(Items.DIAMOND_BOOTS));
         player.getInventory().setItem(0, new ItemStack(Items.DIAMOND_SWORD));
-        player.getInventory().setItem(1, new ItemStack(Items.DIRT, 2));
+        player.getInventory().setItem(1, new ItemStack(Items.BOW));
+        player.getInventory().setItem(2, new ItemStack(Items.ARROW, 64));
+        player.getInventory().setItem(3, new ItemStack(Items.ARROW, 64));
+        player.getInventory().setItem(4, new ItemStack(Items.GOLDEN_APPLE, 5));
+        player.getInventory().setItem(5, new ItemStack(Items.DIRT, 2));
         player.setHealth(player.getMaxHealth());
 
         // 3. Construit l'arène + remplace le OneBlock par de la bedrock
@@ -314,9 +322,11 @@ public class BossManager {
         data.blocksBroken = state.targetPhase().startCount;
         PlayerDataManager.saveToDisk(data, server);
 
-        // Restaure le OneBlock + supprime l'arène
+        // Restaure le OneBlock
         restoreOneBlock(server, data);
-        removeArena(server, playerId);
+        // Supprime l'arène au tick suivant (assure que les chunks sont bien chargés)
+        final UUID pid = playerId;
+        server.execute(() -> removeArena(server, pid));
 
         int reward = 50 + state.majorIdx() * 25;
         CoinManager.addCoins(playerId, reward, server);
@@ -352,12 +362,13 @@ public class BossManager {
             if (boss != null) boss.discard();
         }
 
-        // Supprime l'arène
-        removeArena(server, id);
+        // Supprime l'arène au tick suivant
+        if (server != null) {
+            final UUID fid = id;
+            server.execute(() -> removeArena(server, fid));
+        }
 
-        // Le OneBlock reste en BEDROCK → joueur doit faire /boss
-        // (sera restauré lors de la prochaine victoire)
-
+        // Le OneBlock reste en BEDROCK → joueur doit faire /boss pour réessayer
         cleanUp(id, null); // nettoie les maps mais garde pendingFights
 
         // L'inventaire sera restauré au respawn (voir onPlayerRespawn dans PlayerEventHandler)

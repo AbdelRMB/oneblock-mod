@@ -224,7 +224,16 @@ public class CosmeticManager {
         int i = 0;
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
-                level.setBlock(center.offset(dx, 0, dz), blocks[i].defaultBlockState(), 3);
+                BlockPos pos = center.offset(dx, 0, dz);
+                // Le bloc directement sous le OneBlock (dx=0, dz=0) est TOUJOURS bedrock
+                if (dx == 0 && dz == 0) {
+                    // Vérifie et force la bedrock si nécessaire
+                    if (!level.getBlockState(pos).is(Blocks.BEDROCK)) {
+                        level.setBlock(pos, Blocks.BEDROCK.defaultBlockState(), 3);
+                    }
+                } else {
+                    level.setBlock(pos, blocks[i].defaultBlockState(), 3);
+                }
                 i++;
             }
         }

@@ -276,9 +276,8 @@ public class PlayerEventHandler {
     public static void onLivingDeath(net.minecraftforge.event.entity.living.LivingDeathEvent event) {
         if (!(event.getEntity() instanceof net.minecraft.world.entity.LivingEntity living)) return;
         if (event.getEntity() instanceof ServerPlayer player) {
-            net.minecraft.world.entity.Entity killer = event.getSource().getEntity();
-            if (killer != null && BossManager.isBossOf(killer.getUUID(), player.getUUID())) {
-                // Le boss a tué le joueur → défaite
+            // Toute mort en arène boss = défaite (boss qui tue, chute, etc.)
+            if (BossManager.isInActiveFight(player.getUUID())) {
                 BossManager.onPlayerKilledByBoss(player);
             }
             return;
