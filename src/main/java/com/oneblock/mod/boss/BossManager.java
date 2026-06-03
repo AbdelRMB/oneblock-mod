@@ -256,7 +256,15 @@ public class BossManager {
 
         // Tout ce qui est structural est en BEDROCK → indestructible
 
-        // ── Sol complet en bedrock ────────────────────────────────────────────
+        // ── Sous-sol en bedrock (Y-1) : même si le sol décoratif est cassé, bedrock en dessous ─
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                level.setBlock(new BlockPos(cx + dx, y - 1, cz + dz),
+                    Blocks.BEDROCK.defaultBlockState(), 3);
+            }
+        }
+
+        // ── Sol complet en bedrock (Y) ────────────────────────────────────────
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
                 level.setBlock(new BlockPos(cx + dx, y, cz + dz),
@@ -676,17 +684,17 @@ public class BossManager {
         int cx = pos[0], cz = pos[1];
         int r  = ARENA_HALF;
         int wh = WALL_HEIGHT;
+        ServerLevel level = server.overworld();
 
-        // Enfile tous les blocs à supprimer — traitement progressif dans tickBossBar
-        arenaRemoveLevel = server.overworld();
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
-                for (int dy = 0; dy <= wh + 2; dy++) {
-                    arenaRemoveQueue.add(new BlockPos(cx + dx, ARENA_Y + dy, cz + dz));
+                // Sol bedrock souterrain (Y-1) + sol décoratif (Y) + intérieur + toit
+                for (int dy = -1; dy <= wh + 2; dy++) {
+                    level.setBlock(new BlockPos(cx + dx, ARENA_Y + dy, cz + dz),
+                        Blocks.AIR.defaultBlockState(), 2);
                 }
             }
         }
-        OneBlockMod.LOGGER.info("[OneBlock] Arène mise en file de suppression ({} blocs)", arenaRemoveQueue.size());
     }
 
     private static void restoreOneBlock(MinecraftServer server,
