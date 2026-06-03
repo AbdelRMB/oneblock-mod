@@ -331,6 +331,35 @@ public enum OneBlockPhase {
         return Arrays.stream(newBlocks).map(wb -> wb.block).toList();
     }
 
+    /**
+     * Index de la phase MAJEURE (Plains=0, Underground=1, Winter=2, Ocean=3,
+     * Jungle=4, Swamp=5, Dungeon=6, Desert=7, Nether=8, Plenty=9, End=10).
+     */
+    public int getMajorPhaseIndex() {
+        String n = this.name();
+        if (n.startsWith("PLAINS"))      return 0;
+        if (n.startsWith("UNDERGROUND")) return 1;
+        if (n.startsWith("WINTER"))      return 2;
+        if (n.startsWith("OCEAN"))       return 3;
+        if (n.startsWith("JUNGLE"))      return 4;
+        if (n.startsWith("SWAMP"))       return 5;
+        if (n.startsWith("DUNGEON"))     return 6;
+        if (n.startsWith("DESERT"))      return 7;
+        if (n.startsWith("NETHER"))      return 8;
+        if (n.startsWith("PLENTY"))      return 9;
+        if (n.startsWith("END"))         return 10;
+        return -1;
+    }
+
+    /** Retourne le premier sous-niveau de la phase majeure actuelle. */
+    public OneBlockPhase getMajorPhaseStart() {
+        int idx = getMajorPhaseIndex();
+        for (OneBlockPhase p : values()) {
+            if (p.getMajorPhaseIndex() == idx) return p;
+        }
+        return PLAINS_1;
+    }
+
     public static class WeightedBlock {
         public final Block block;
         public final int weight;

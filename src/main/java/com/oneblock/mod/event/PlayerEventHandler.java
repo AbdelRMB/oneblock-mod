@@ -1,12 +1,17 @@
 package com.oneblock.mod.event;
 
 import com.oneblock.mod.OneBlockMod;
+import com.oneblock.mod.achievement.AchievementManager;
+import com.oneblock.mod.boss.BossManager;
 import com.oneblock.mod.challenge.ChallengeManager;
 import com.oneblock.mod.config.OneBlockConfig;
+import com.oneblock.mod.cosmetic.CosmeticManager;
 import com.oneblock.mod.data.CollectionTracker;
 import com.oneblock.mod.data.PlayerDataManager;
 import com.oneblock.mod.data.PlayerDataManager.PlayerOneBlockData;
 import com.oneblock.mod.data.PlayerDataManager.PhaseChangeResult;
+import com.oneblock.mod.economy.CoinManager;
+import com.oneblock.mod.prestige.PrestigeManager;
 import com.oneblock.mod.world.OneBlockPhase;
 import com.oneblock.mod.world.OneBlockWorldGen;
 import net.minecraft.core.BlockPos;
@@ -73,12 +78,14 @@ public class PlayerEventHandler {
             }
         }
 
-        // ── Challenges : vérification du jour pour chaque joueur ─────────────
+        // ── Challenges + boss bar + trails ───────────────────────────────────
         if (gameTime % 40 == 0) {
             long currentDay = gameTime / 24000L;
             for (ServerPlayer p : server.getPlayerList().getPlayers()) {
                 ChallengeManager.tick(p, currentDay);
             }
+            BossManager.tickBossBar(server.overworld());
+            CosmeticManager.tickTrails(server);
         }
     }
 
@@ -95,8 +102,11 @@ public class PlayerEventHandler {
         boolean isNewPlayer = !hasExistingData(playerId, server);
         PlayerOneBlockData data = PlayerDataManager.getOrCreate(playerId, server);
 
-        // Charge la collection et les données challenges
+        // Charge toutes les données persistées
         CollectionTracker.loadFromDisk(playerId, server);
+        CoinManager.loadFromDisk(playerId, server);
+        AchievementManager.loadFromDisk(playerId, server);
+        PrestigeManager.loadFromDisk(playerId, server);
 
         server.execute(() -> {
             ServerLevel level = server.overworld();
@@ -154,25 +164,67 @@ public class PlayerEventHandler {
 
         ServerLevel level = (ServerLevel) event.getLevel();
 
+        // ── Si boss actif : bloque la progression (drop normal, pas d'incrément) ─
+        if (BossManager.hasBoss(playerId)) {
+            net.minecraft.world.phys.Vec3 m = player.getDeltaMovement();
+            player.setDeltaMovement(m.x, Math.max(m.y, 0.2), m.z);
+            nextTickTasks.add(() -> {
+                PlayerOneBlockData d = PlayerDataManager.getOrCreate(playerId, server);
+                OneBlockWorldGen.regenerateBlock(level, brokenPos, d);
+            });
+            return; // drop vanilla OK, mais pas d'incrément
+        }
+
         // Impulsion vers le haut (évite push/chute lors de la régénération)
         net.minecraft.world.phys.Vec3 motion = player.getDeltaMovement();
         player.setDeltaMovement(motion.x, Math.max(motion.y, 0.2), motion.z);
 
-        // ── Collection : enregistre le bloc cassé ────────────────────────────
+        // ── Collection ───────────────────────────────────────────────────────
         CollectionTracker.recordBlock(playerId, event.getState().getBlock(), server);
 
         // ── Incrémente la progression ─────────────────────────────────────────
         PhaseChangeResult result = PlayerDataManager.incrementBlocksBroken(playerId, server);
+
         if (result.changed) {
-            OneBlockWorldGen.notifyPhaseChange(player, result.oldPhase, result.newPhase);
+            boolean majorChange = result.oldPhase.getMajorPhaseIndex()
+                                  != result.newPhase.getMajorPhaseIndex();
+            if (majorChange) {
+                // Boss de phase
+                boolean bossSpawned = BossManager.onMajorPhaseTransition(
+                    player, level, result.oldPhase, result.newPhase);
+                if (bossSpawned) {
+                    // Revert la progression : reste dans l'ancienne phase pendant le boss
+                    PlayerOneBlockData d = PlayerDataManager.getOrCreate(playerId, server);
+                    d.blocksBroken = result.newPhase.startCount - 1;
+                    PlayerDataManager.saveToDisk(d, server);
+                }
+                // Achievement phase
+                AchievementManager.checkPhaseReached(player, result.newPhase.getMajorPhaseIndex());
+            }
+            if (!BossManager.hasBoss(playerId)) {
+                OneBlockWorldGen.notifyPhaseChange(player, result.oldPhase, result.newPhase);
+                CosmeticManager.onPhaseChange(player,
+                    PlayerDataManager.getOrCreate(playerId, server));
+            }
         }
+
+        // ── Achievements blocs cassés ─────────────────────────────────────────
+        PlayerOneBlockData fresh = PlayerDataManager.getOrCreate(playerId, server);
+        AchievementManager.checkBlocksBroken(player, fresh.blocksBroken);
+
+        // ── Coins : 1 par break + bonus prestige ─────────────────────────────
+        int coins = 1 + PrestigeManager.getCoinBonusPerBreak(playerId);
+        CoinManager.addCoins(playerId, coins, server);
 
         // ── Challenge : progression break ─────────────────────────────────────
         ChallengeManager.onBlockBroken(player);
 
-        // ── Bloc rare (1% de chance) ──────────────────────────────────────────
-        if (RARE_RANDOM.nextFloat() < 0.01f) {
-            triggerRareEvent(player, level, brokenPos, data.getCurrentPhase());
+        // ── Bloc rare ─────────────────────────────────────────────────────────
+        float rareChance = 0.01f + PrestigeManager.getRareBonusChance(playerId);
+        if (RARE_RANDOM.nextFloat() < rareChance) {
+            triggerRareEvent(player, level, brokenPos, fresh.getCurrentPhase());
+            AchievementManager.onRareBlock(player);
+            CoinManager.addCoins(playerId, 5, server); // bonus rare
         }
 
         // ── HUD + régénération ────────────────────────────────────────────────
@@ -208,6 +260,25 @@ public class PlayerEventHandler {
         player.sendSystemMessage(
             Component.literal("§c§lTu es tombé dans le vide ! §r§7Retour à ton bloc.")
         );
+    }
+
+    // ─── Mort d'entité (boss) ────────────────────────────────────────────────
+
+    @SubscribeEvent
+    public static void onLivingDeath(net.minecraftforge.event.entity.living.LivingDeathEvent event) {
+        if (!(event.getEntity() instanceof net.minecraft.world.entity.LivingEntity living)) return;
+        if (event.getEntity() instanceof ServerPlayer player) {
+            // Régression uniquement si c'est le boss qui a tué le joueur directement
+            net.minecraft.world.entity.Entity killer = event.getSource().getEntity();
+            if (killer != null && BossManager.isBossOf(killer.getUUID(), player.getUUID())) {
+                BossManager.onPlayerDeath(player);
+            }
+            return;
+        }
+        if (event.getEntity().level() instanceof ServerLevel level) {
+            BossManager.onEntityDeath(living, level);
+            // Achievement boss killed (sera géré dans BossManager → onBossKilled)
+        }
     }
 
     // ─── Respawn après mort ──────────────────────────────────────────────────
@@ -247,12 +318,20 @@ public class PlayerEventHandler {
 
         UUID playerId = player.getUUID();
 
-        // Sauvegarde collection
+        // Sauvegardes
         CollectionTracker.saveToDisk(playerId, server);
-        CollectionTracker.clearCache(playerId);
+        CoinManager.saveToDisk(playerId, server);
+        AchievementManager.saveToDisk(playerId, server);
+        PrestigeManager.saveToDisk(playerId, server);
 
-        // Nettoie les challenges en mémoire
+        // Nettoyage caches
+        CollectionTracker.clearCache(playerId);
+        CoinManager.clearCache(playerId);
+        AchievementManager.clearCache(playerId);
+        PrestigeManager.clearCache(playerId);
         ChallengeManager.clearPlayer(playerId);
+        BossManager.cleanupOnLogout(playerId, player);
+        CosmeticManager.cleanupOnLogout(playerId, player);
 
         // Retire la boss bar
         ServerBossEvent bar = bossBars.remove(playerId);
