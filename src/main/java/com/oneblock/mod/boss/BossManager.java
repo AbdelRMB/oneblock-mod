@@ -17,26 +17,34 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.BossEvent;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.Blocks;
 
-import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Gère les boss de phase.
+ * Système de boss de phase — arène dédiée.
  *
- * Quand le joueur franchit une frontière de phase MAJEURE (Plains → Underground, etc.),
- * un boss apparaît sur son île. La progression est bloquée tant que le boss est vivant.
- * Si le boss tue le joueur → régression au début de la dernière sous-phase.
- * Si le joueur tue le boss → la phase s'ouvre + récompense.
+ * Déroulement :
+ *  1. Transition de phase majeure détectée → téléportation dans l'arène 30×30 en bedrock
+ *  2. Inventaire sauvegardé, équipement : full diamant + épée diamant + 5 terre
+ *  3. Boss spawné au centre de l'arène (puissance croissante par phase)
+ *  4. Victoire → retour île, inventaire restauré, phase débloquée
+ *  5. Défaite → retour île, inventaire restauré, boss en attente → /boss pour réessayer
+ *     Le OneBlock est bloqué jusqu'à victoire sur le boss.
  */
 public class BossManager {
 
-    /** Mob spawné pour chaque transition de phase majeure (index = phase d'origine). */
+    // ─── Constantes arène ────────────────────────────────────────────────────
+    private static final int ARENA_Y       = 150;   // altitude de l'arène
+    private static final int ARENA_HALF    = 15;    // demi-côté → arène 30×30
+    private static final int WALL_HEIGHT   = 7;     // hauteur des murs
+
+    // ─── Mobs par phase majeure ───────────────────────────────────────────────
     private static final String[] BOSS_MOBS = {
         "minecraft:zombie",           // Plains → Underground
         "minecraft:skeleton",         // Underground → Winter
@@ -49,243 +57,451 @@ public class BossManager {
         "minecraft:wither_skeleton",  // Nether → Plenty
         "minecraft:wither",           // Plenty → End
     };
-
     private static final String[] BOSS_NAMES = {
-        "§cRoi Zombie",
-        "§7Archer des Ombres",
-        "§bSorcière des Glaces",
-        "§9Gardien des Profondeurs",
-        "§2Ravageur de la Jungle",
-        "§2Sorcière des Marais",
-        "§8Vindicateur Maudit",
-        "§eRôdeur du Désert",
-        "§cSquelette du Nether",
+        "§cRoi Zombie",         "§7Archer des Ombres",    "§bSorcière des Glaces",
+        "§9Gardien des Fonds",  "§2Ravageur",             "§2Invocateur des Marais",
+        "§8Vindicateur Maudit", "§eRôdeur du Désert",     "§cSquelette du Nether",
         "§5Le Destructeur",
     };
 
-    /** playerUUID → bossEntityUUID */
-    private static final Map<UUID, UUID>            activeBosses   = new ConcurrentHashMap<>();
-    /** playerUUID → blocksBroken à restaurer si le boss tue le joueur */
-    private static final Map<UUID, Integer>         revertPoints   = new ConcurrentHashMap<>();
-    /** playerUUID → phase cible à débloquer quand le boss meurt */
-    private static final Map<UUID, OneBlockPhase>   targetPhases   = new ConcurrentHashMap<>();
-    /** playerUUID → boss bar */
-    private static final Map<UUID, ServerBossEvent> bossBars       = new ConcurrentHashMap<>();
-    /** bossEntityUUID → playerUUID (lookup inverse) */
-    private static final Map<UUID, UUID>            bossToPlayer   = new ConcurrentHashMap<>();
+    // ─── État par joueur ──────────────────────────────────────────────────────
+    /** Paramètres d'un combat en cours ou en attente. */
+    record FightState(OneBlockPhase oldPhase, OneBlockPhase targetPhase, int majorIdx) {}
+
+    /** Combat actif (joueur dans l'arène). */
+    private static final Map<UUID, FightState>    activeFights      = new ConcurrentHashMap<>();
+    /** Combat en attente (joueur a perdu, peut retenter avec /boss). */
+    private static final Map<UUID, FightState>    pendingFights     = new ConcurrentHashMap<>();
+    /** UUID de l'entité boss → UUID du joueur. */
+    private static final Map<UUID, UUID>           bossToPlayer      = new ConcurrentHashMap<>();
+    /** Inventaire sauvegardé avant l'arène. */
+    private static final Map<UUID, List<ItemStack>> savedInventories = new ConcurrentHashMap<>();
+    /** Armure sauvegardée. */
+    private static final Map<UUID, ItemStack[]>    savedArmor        = new ConcurrentHashMap<>();
+    /** Boss bars actives. */
+    private static final Map<UUID, ServerBossEvent> bossBars         = new ConcurrentHashMap<>();
+    /** UUID entité boss active par joueur. */
+    private static final Map<UUID, UUID>           activeBossEntity  = new ConcurrentHashMap<>();
+    /** Position centre de l'arène par joueur [cx, cz]. */
+    private static final Map<UUID, int[]>          arenaPositions    = new ConcurrentHashMap<>();
 
     // ─── API publique ─────────────────────────────────────────────────────────
 
-    public static boolean hasBoss(UUID playerId) {
-        return activeBosses.containsKey(playerId);
+    /** True si un combat est actif OU en attente → bloque le OneBlock. */
+    public static boolean hasBossBlocking(UUID id) {
+        return activeFights.containsKey(id) || pendingFights.containsKey(id);
     }
 
-    /** Retourne true si l'entité bossId est bien le boss du joueur playerId. */
-    public static boolean isBossOf(UUID bossId, UUID playerId) {
-        UUID expected = activeBosses.get(playerId);
-        return expected != null && expected.equals(bossId);
+    public static boolean isBossOf(UUID bossEntityId, UUID playerId) {
+        return bossEntityId.equals(activeBossEntity.get(playerId));
     }
 
-    /**
-     * Appelé dans PlayerEventHandler quand un changement de phase MAJEURE est détecté.
-     * Spawn le boss et bloque la progression.
-     * @return true si un boss a été spawné.
-     */
-    public static boolean onMajorPhaseTransition(ServerPlayer player, ServerLevel level,
-                                                  OneBlockPhase oldPhase, OneBlockPhase newPhase) {
-        if (hasBoss(player.getUUID())) return false;
-
+    /** Appelé lors d'une transition de phase majeure. Démarre le combat. */
+    public static void onMajorPhaseTransition(ServerPlayer player, ServerLevel level,
+                                               OneBlockPhase oldPhase, OneBlockPhase newPhase) {
+        UUID id = player.getUUID();
         int majorIdx = oldPhase.getMajorPhaseIndex();
-        if (majorIdx < 0 || majorIdx >= BOSS_MOBS.length) return false;
-
-        // Point de régression = début de la dernière sous-phase de la phase précédente
-        int revertPoint = oldPhase.getMajorPhaseStart().startCount;
-
-        spawnBoss(player, level, majorIdx, newPhase, revertPoint);
-        return true;
-    }
-
-    /**
-     * Appelé quand une entité meurt (LivingDeathEvent).
-     * Vérifie si c'était le boss d'un joueur.
-     */
-    public static void onEntityDeath(LivingEntity entity, ServerLevel level) {
-        UUID bossId = entity.getUUID();
-        UUID playerId = bossToPlayer.get(bossId);
-        if (playerId == null) return;
-
-        ServerPlayer player = level.getServer().getPlayerList().getPlayer(playerId);
-        onBossKilled(playerId, player, level.getServer());
-    }
-
-    /**
-     * Appelé quand le joueur meurt.
-     * Si son boss est actif, il régresse.
-     */
-    public static void onPlayerDeath(ServerPlayer player) {
-        UUID playerId = player.getUUID();
-        if (!hasBoss(playerId)) return;
-
-        int revert = revertPoints.getOrDefault(playerId, 0);
-        PlayerDataManager.PlayerOneBlockData data =
-            PlayerDataManager.getOrCreate(playerId, (MinecraftServer) player.level().getServer());
-        data.blocksBroken = revert;
-        PlayerDataManager.saveToDisk(data, (MinecraftServer) player.level().getServer());
-
-        // Supprime l'entité boss du monde
-        UUID bossId = activeBosses.get(playerId);
-        if (bossId != null && player.level() instanceof ServerLevel sl) {
-            net.minecraft.world.entity.Entity boss = sl.getEntity(bossId);
-            if (boss != null) boss.discard();
+        if (majorIdx < 0 || majorIdx >= BOSS_MOBS.length) {
+            // Pas de boss pour cette transition → débloque directement
+            return;
         }
 
-        cleanBoss(playerId, player);
-
-        player.sendSystemMessage(Component.literal(
-            "§c☠ Le boss t'a eu ! §7Tu repasses au début de la phase précédente (§f"
-            + revert + " §7blocs)."));
+        FightState state = new FightState(oldPhase, newPhase, majorIdx);
+        startFight(player, level, state);
     }
 
-    /** Met à jour la boss bar avec les PV actuels de l'entité. */
-    public static void tickBossBar(ServerLevel level) {
-        for (Map.Entry<UUID, UUID> entry : activeBosses.entrySet()) {
-            UUID playerId = entry.getKey();
-            UUID bossId   = entry.getValue();
+    /** Commande /boss — réessaie le combat si en attente. */
+    public static void retryBoss(ServerPlayer player, ServerLevel level) {
+        UUID id = player.getUUID();
 
-            net.minecraft.world.entity.Entity bossEntity = level.getEntity(bossId);
-            ServerBossEvent bar = bossBars.get(playerId);
+        if (activeFights.containsKey(id)) {
+            player.sendSystemMessage(Component.literal("§cTu es déjà dans une arène !"));
+            return;
+        }
+        FightState state = pendingFights.get(id);
+        if (state == null) {
+            player.sendSystemMessage(Component.literal("§7Aucun boss en attente pour toi."));
+            return;
+        }
+        startFight(player, level, state);
+    }
 
-            if (bar == null) continue;
+    /** Joueur mine son OneBlock avec un boss en attente → message de blocage. */
+    public static void notifyBlocked(ServerPlayer player) {
+        if (pendingFights.containsKey(player.getUUID())) {
+            player.sendSystemMessage(Component.literal(
+                "§c⚔ Tu dois d'abord affronter le boss ! §7Tape §f/boss §7pour entrer dans l'arène."));
+        }
+    }
 
-            if (bossEntity instanceof LivingEntity living) {
-                float pct = living.getHealth() / living.getMaxHealth();
-                bar.setProgress(Math.max(0f, Math.min(1f, pct)));
-            } else {
-                // Boss introuvable → il est peut-être mort via un autre moyen
-                cleanBoss(playerId, level.getServer().getPlayerList().getPlayer(playerId));
+    // ─── Démarrage du combat ──────────────────────────────────────────────────
+
+    private static void startFight(ServerPlayer player, ServerLevel level, FightState state) {
+        UUID id = player.getUUID();
+
+        activeFights.put(id, state);
+        pendingFights.remove(id);
+
+        // 1. Sauvegarde l'inventaire
+        saveInventory(player);
+
+        // 2. Donne l'équipement d'arène
+        player.getInventory().clearContent();
+        player.setItemSlot(EquipmentSlot.HEAD,  new ItemStack(Items.DIAMOND_HELMET));
+        player.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.DIAMOND_CHESTPLATE));
+        player.setItemSlot(EquipmentSlot.LEGS,  new ItemStack(Items.DIAMOND_LEGGINGS));
+        player.setItemSlot(EquipmentSlot.FEET,  new ItemStack(Items.DIAMOND_BOOTS));
+        player.getInventory().setItem(0, new ItemStack(Items.DIAMOND_SWORD));
+        player.getInventory().setItem(1, new ItemStack(Items.DIRT, 2));
+        player.setHealth(player.getMaxHealth());
+
+        // 3. Construit l'arène + remplace le OneBlock par de la bedrock
+        PlayerDataManager.PlayerOneBlockData data =
+            PlayerDataManager.getOrCreate(id, level.getServer());
+        int aX = data.blockPos.getX();
+        int aZ = data.blockPos.getZ();
+        buildArena(level, aX, aZ);
+        arenaPositions.put(id, new int[]{aX, aZ});
+
+        // Remplace le OneBlock par bedrock → indestructible pendant le combat
+        level.setBlock(data.blockPos, Blocks.BEDROCK.defaultBlockState(), 3);
+
+        // 4. Téléporte dans l'arène
+        player.teleportTo(level, aX + 0.5, ARENA_Y + 1, aZ + 0.5,
+            Set.of(), 0, 0, true);
+
+        // 5. Spawne le boss
+        spawnBoss(player, level, aX, aZ, state);
+
+        // 6. Message + titre
+        player.connection.send(new ClientboundSetTitlesAnimationPacket(5, 70, 15));
+        player.connection.send(new ClientboundSetTitleTextPacket(
+            Component.literal("§c⚔ COMBAT DE PHASE ⚔")));
+        player.connection.send(new ClientboundSetSubtitleTextPacket(
+            Component.literal(BOSS_NAMES[state.majorIdx()] + " §7t'attend !")));
+        player.sendSystemMessage(Component.literal(
+            "§c⚔ §lCombat de phase ! §r§7Tue le boss pour débloquer la prochaine phase."));
+        player.sendSystemMessage(Component.literal(
+            "§7Tu as : §ffull diamant §7+ §f5 terre§7. Bonne chance !"));
+    }
+
+    // ─── Construction de l'arène ──────────────────────────────────────────────
+
+    private static void buildArena(ServerLevel level, int cx, int cz) {
+        int y  = ARENA_Y;
+        int r  = ARENA_HALF;
+        int wh = WALL_HEIGHT;
+
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                boolean isWall = dx == -r || dx == r || dz == -r || dz == r;
+
+                // Sol
+                level.setBlock(new BlockPos(cx + dx, y, cz + dz),
+                    Blocks.BEDROCK.defaultBlockState(), 3);
+
+                // Murs
+                if (isWall) {
+                    for (int dy = 1; dy <= wh; dy++) {
+                        level.setBlock(new BlockPos(cx + dx, y + dy, cz + dz),
+                            Blocks.BEDROCK.defaultBlockState(), 3);
+                    }
+                    // Toit du mur = bedrock
+                    level.setBlock(new BlockPos(cx + dx, y + wh + 1, cz + dz),
+                        Blocks.BEDROCK.defaultBlockState(), 3);
+                } else {
+                    // Intérieur : air propre
+                    for (int dy = 1; dy <= wh + 1; dy++) {
+                        level.setBlock(new BlockPos(cx + dx, y + dy, cz + dz),
+                            Blocks.AIR.defaultBlockState(), 3);
+                    }
+                }
+            }
+        }
+
+        // Lumière centrale (glowstone au plafond)
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                level.setBlock(new BlockPos(cx + dx, y + wh + 1, cz + dz),
+                    Blocks.GLOWSTONE.defaultBlockState(), 3);
             }
         }
     }
 
-    // ─── Spawn ───────────────────────────────────────────────────────────────
+    // ─── Spawn du boss ────────────────────────────────────────────────────────
 
     private static void spawnBoss(ServerPlayer player, ServerLevel level,
-                                   int phaseIdx, OneBlockPhase targetPhase, int revertPoint) {
-        String mobKey  = BOSS_MOBS[phaseIdx];
-        String bossName = BOSS_NAMES[phaseIdx];
-
-        // Santé et dégâts croissants par phase
-        double health = 60 + phaseIdx * 30;
-        double damage = 5  + phaseIdx * 2;
+                                   int cx, int cz, FightState state) {
+        int idx = state.majorIdx();
+        String mobKey   = BOSS_MOBS[idx];
+        String bossName = BOSS_NAMES[idx];
+        double health   = 60  + idx * 30;
+        double damage   = 5   + idx * 2;
 
         Optional<EntityType<?>> typeOpt = EntityType.byString(mobKey);
         if (typeOpt.isEmpty()) {
-            OneBlockMod.LOGGER.warn("[OneBlock] Boss introuvable : {}", mobKey);
+            OneBlockMod.LOGGER.warn("[OneBlock] Boss mob inconnu : {}", mobKey);
             return;
         }
 
         net.minecraft.world.entity.Entity entity = typeOpt.get().create(level, EntitySpawnReason.NATURAL);
         if (!(entity instanceof LivingEntity boss)) return;
 
-        // Position sur le point le plus haut de l'île
-        BlockPos islandPos = PlayerDataManager.getOrCreate(player.getUUID(),
-            (MinecraftServer) player.level().getServer()).blockPos;
-        int topY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
-            islandPos.getX(), islandPos.getZ());
-        boss.setPos(islandPos.getX() + 0.5, topY + 0.5, islandPos.getZ() + 0.5);
-
-        // Attributs boostés
-        if (boss.getAttribute(Attributes.MAX_HEALTH) != null)
-            boss.getAttribute(Attributes.MAX_HEALTH).setBaseValue(health);
-        boss.setHealth((float) health);
-        if (boss.getAttribute(Attributes.ATTACK_DAMAGE) != null)
-            boss.getAttribute(Attributes.ATTACK_DAMAGE).setBaseValue(damage);
-
+        boss.setPos(cx + 0.5, ARENA_Y + 1, cz + 10); // décalé pour laisser de l'espace
         boss.setCustomName(Component.literal(bossName));
         boss.setCustomNameVisible(true);
-        if (boss instanceof net.minecraft.world.entity.Mob mob) {
-            mob.setPersistenceRequired();
-        }
+
+        if (boss.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH) != null)
+            boss.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH).setBaseValue(health);
+        boss.setHealth((float) health);
+        if (boss.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE) != null)
+            boss.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE).setBaseValue(damage);
+
+        if (boss instanceof net.minecraft.world.entity.Mob mob) mob.setPersistenceRequired();
 
         level.addFreshEntity(boss);
 
-        UUID bossUUID   = boss.getUUID();
-        UUID playerUUID = player.getUUID();
-
-        activeBosses.put(playerUUID, bossUUID);
-        revertPoints.put(playerUUID, revertPoint);
-        targetPhases.put(playerUUID, targetPhase);
-        bossToPlayer.put(bossUUID, playerUUID);
+        UUID playerId = player.getUUID();
+        activeBossEntity.put(playerId, boss.getUUID());
+        bossToPlayer.put(boss.getUUID(), playerId);
 
         // Boss bar
-        ServerBossEvent bar = new ServerBossEvent(
-            playerUUID,
-            Component.literal(bossName + " §8— §7" + (int)health + " PV"),
-            BossEvent.BossBarColor.RED,
-            BossEvent.BossBarOverlay.NOTCHED_10
-        );
+        ServerBossEvent bar = new ServerBossEvent(playerId,
+            Component.literal(bossName + "  §8[§c" + (int)health + " PV§8]"),
+            BossEvent.BossBarColor.RED, BossEvent.BossBarOverlay.NOTCHED_10);
         bar.setProgress(1f);
         bar.addPlayer(player);
-        bossBars.put(playerUUID, bar);
-
-        // Titre plein écran
-        player.connection.send(new ClientboundSetTitlesAnimationPacket(5, 60, 15));
-        player.connection.send(new ClientboundSetTitleTextPacket(
-            Component.literal("§c⚔ BOSS APPARU ⚔")));
-        player.connection.send(new ClientboundSetSubtitleTextPacket(
-            Component.literal(bossName + " §7— Tue-le pour avancer !")));
-
-        player.sendSystemMessage(Component.literal(
-            "§c§l⚔ " + bossName + " §r§7est apparu sur ton île !"));
-        player.sendSystemMessage(Component.literal(
-            "§7Santé : §c" + (int)health + " PV §8| §7Dégâts : §c" + (int)damage
-            + " §7| Si tu meurs → §frégression au bloc §c" + revertPoint));
+        bossBars.put(playerId, bar);
     }
 
-    // ─── Boss tué ────────────────────────────────────────────────────────────
+    // ─── Événements ──────────────────────────────────────────────────────────
 
-    private static void onBossKilled(UUID playerId, ServerPlayer player, MinecraftServer server) {
-        OneBlockPhase target = targetPhases.getOrDefault(playerId, null);
+    /** Appelé depuis LivingDeathEvent quand une entité meurt. */
+    public static void onEntityDeath(LivingEntity entity, ServerLevel level) {
+        UUID bossId   = entity.getUUID();
+        UUID playerId = bossToPlayer.get(bossId);
+        if (playerId == null) return;
 
-        if (target != null && player != null) {
-            // Débloque la phase
-            PlayerDataManager.PlayerOneBlockData data =
-                PlayerDataManager.getOrCreate(playerId, server);
-            data.blocksBroken = target.startCount;
-            PlayerDataManager.saveToDisk(data, server);
+        level.getServer().execute(() -> {
+            try {
+                ServerPlayer player = level.getServer().getPlayerList().getPlayer(playerId);
+                onBossVictory(playerId, player, level.getServer());
+            } catch (Exception e) {
+                OneBlockMod.LOGGER.error("[OneBlock] Erreur boss victory: {}", e.getMessage());
+                cleanUp(playerId, null);
+            }
+        });
+    }
 
-            // Récompense coins
-            int reward = 50 + target.getMajorPhaseIndex() * 25;
-            CoinManager.addCoins(playerId, reward, server);
+    /** Appelé depuis LivingDeathEvent quand LE BOSS tue le joueur. */
+    public static void onPlayerKilledByBoss(ServerPlayer player) {
+        UUID id = player.getUUID();
+        if (!activeFights.containsKey(id)) return;
 
-            // Achievement boss
+        FightState state = activeFights.get(id);
+        onBossDefeat(player, state, (MinecraftServer) player.level().getServer());
+    }
+
+    // ─── Victoire / Défaite ───────────────────────────────────────────────────
+
+    private static void onBossVictory(UUID playerId, ServerPlayer player, MinecraftServer server) {
+        FightState state = activeFights.get(playerId);
+        if (state == null) { cleanUp(playerId, player); return; }
+
+        // Débloque la phase
+        PlayerDataManager.PlayerOneBlockData data =
+            PlayerDataManager.getOrCreate(playerId, server);
+        data.blocksBroken = state.targetPhase().startCount;
+        PlayerDataManager.saveToDisk(data, server);
+
+        // Restaure le OneBlock + supprime l'arène
+        restoreOneBlock(server, data);
+        removeArena(server, playerId);
+
+        int reward = 50 + state.majorIdx() * 25;
+        CoinManager.addCoins(playerId, reward, server);
+
+        if (player != null && player.isAlive()) {
             AchievementManager.onBossKilled(player);
+            teleportToIsland(player, data, server);
+            restoreInventory(player);
 
-            // Notification
-            player.connection.send(new ClientboundSetTitlesAnimationPacket(5, 70, 20));
+            player.connection.send(new ClientboundSetTitlesAnimationPacket(5, 80, 20));
             player.connection.send(new ClientboundSetTitleTextPacket(
-                Component.literal("§a§l✦ BOSS VAINCU ✦")));
+                Component.literal("§a§l✦ VICTOIRE ✦")));
             player.connection.send(new ClientboundSetSubtitleTextPacket(
-                Component.literal("§e+" + reward + " OneCoins §7| §aPhase débloquée !")));
-
+                Component.literal("§ePhase débloquée ! §7+" + reward + " §6⬡")));
             player.sendSystemMessage(Component.literal(
-                "§a§l✦ Boss vaincu ! §r§7+" + reward + " OneCoins. Phase débloquée !"));
+                "§a§l✦ Boss vaincu ! §r§7Phase débloquée. §e+" + reward + " OneCoins."));
         }
 
-        cleanBoss(playerId, player);
+        cleanUp(playerId, player);
     }
 
-    private static void cleanBoss(UUID playerId, ServerPlayer player) {
-        UUID bossId = activeBosses.remove(playerId);
+    private static void onBossDefeat(ServerPlayer player, FightState state, MinecraftServer server) {
+        UUID id = player.getUUID();
+
+        // Passe en attente pour /boss retry
+        pendingFights.put(id, state);
+
+        // Despawn le boss
+        UUID bossId = activeBossEntity.get(id);
+        if (bossId != null && server != null) {
+            ServerLevel level = server.overworld();
+            net.minecraft.world.entity.Entity boss = level.getEntity(bossId);
+            if (boss != null) boss.discard();
+        }
+
+        // Supprime l'arène
+        removeArena(server, id);
+
+        // Le OneBlock reste en BEDROCK → joueur doit faire /boss
+        // (sera restauré lors de la prochaine victoire)
+
+        cleanUp(id, null); // nettoie les maps mais garde pendingFights
+
+        // L'inventaire sera restauré au respawn (voir onPlayerRespawn dans PlayerEventHandler)
+    }
+
+    /** Appelé depuis PlayerEventHandler.onPlayerRespawn si le joueur était dans une arène. */
+    public static void onPlayerRespawnAfterDefeat(ServerPlayer player) {
+        UUID id = player.getUUID();
+        if (!savedInventories.containsKey(id) && !savedArmor.containsKey(id)) return;
+
+        MinecraftServer server = (MinecraftServer) player.level().getServer();
+        if (server == null) { restoreInventory(player); return; }
+
+        server.execute(() -> {
+            restoreInventory(player);
+            player.sendSystemMessage(Component.literal(
+                "§c☠ Défaite ! §7Le boss t'attend encore. §fTape §e/boss §fpour réessayer."));
+        });
+    }
+
+    /** True si le joueur a un inventaire sauvegardé (était dans une arène). */
+    public static boolean hasArenaInventory(UUID id) {
+        return savedInventories.containsKey(id);
+    }
+
+    // ─── Tick boss bar ────────────────────────────────────────────────────────
+
+    public static void tickBossBar(ServerLevel level) {
+        for (Map.Entry<UUID, UUID> entry : activeBossEntity.entrySet()) {
+            UUID playerId = entry.getKey();
+            UUID bossId   = entry.getValue();
+            ServerBossEvent bar = bossBars.get(playerId);
+            if (bar == null) continue;
+
+            net.minecraft.world.entity.Entity e = level.getEntity(bossId);
+            if (e instanceof LivingEntity living) {
+                bar.setProgress(Math.max(0f, living.getHealth() / living.getMaxHealth()));
+            }
+        }
+    }
+
+    // ─── Nettoyage ────────────────────────────────────────────────────────────
+
+    private static void cleanUp(UUID playerId, ServerPlayer player) {
+        UUID bossId = activeBossEntity.remove(playerId);
         if (bossId != null) bossToPlayer.remove(bossId);
-        revertPoints.remove(playerId);
-        targetPhases.remove(playerId);
+        activeFights.remove(playerId);
 
         ServerBossEvent bar = bossBars.remove(playerId);
         if (bar != null && player != null) bar.removePlayer(player);
     }
 
     public static void cleanupOnLogout(UUID playerId, ServerPlayer player) {
-        cleanBoss(playerId, player);
+        cleanUp(playerId, player);
+        savedInventories.remove(playerId);
+        savedArmor.remove(playerId);
+        arenaPositions.remove(playerId);
+        // On garde pendingFights → joueur peut réessayer à la reconnexion
+    }
+
+    // ─── Inventaire ──────────────────────────────────────────────────────────
+
+    private static void saveInventory(ServerPlayer player) {
+        UUID id = player.getUUID();
+
+        List<ItemStack> inv = new ArrayList<>();
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            inv.add(player.getInventory().getItem(i).copy());
+        }
+        savedInventories.put(id, inv);
+
+        savedArmor.put(id, new ItemStack[]{
+            player.getItemBySlot(EquipmentSlot.HEAD).copy(),
+            player.getItemBySlot(EquipmentSlot.CHEST).copy(),
+            player.getItemBySlot(EquipmentSlot.LEGS).copy(),
+            player.getItemBySlot(EquipmentSlot.FEET).copy(),
+        });
+    }
+
+    private static void restoreInventory(ServerPlayer player) {
+        UUID id = player.getUUID();
+
+        // Vide l'inventaire actuel (équipement d'arène)
+        player.getInventory().clearContent();
+        player.setItemSlot(EquipmentSlot.HEAD,  ItemStack.EMPTY);
+        player.setItemSlot(EquipmentSlot.CHEST, ItemStack.EMPTY);
+        player.setItemSlot(EquipmentSlot.LEGS,  ItemStack.EMPTY);
+        player.setItemSlot(EquipmentSlot.FEET,  ItemStack.EMPTY);
+
+        // Restaure l'inventaire
+        List<ItemStack> inv = savedInventories.remove(id);
+        if (inv != null) {
+            for (int i = 0; i < Math.min(inv.size(), player.getInventory().getContainerSize()); i++) {
+                player.getInventory().setItem(i, inv.get(i));
+            }
+        }
+
+        ItemStack[] armor = savedArmor.remove(id);
+        if (armor != null) {
+            if (armor.length > 0) player.setItemSlot(EquipmentSlot.HEAD,  armor[0]);
+            if (armor.length > 1) player.setItemSlot(EquipmentSlot.CHEST, armor[1]);
+            if (armor.length > 2) player.setItemSlot(EquipmentSlot.LEGS,  armor[2]);
+            if (armor.length > 3) player.setItemSlot(EquipmentSlot.FEET,  armor[3]);
+        }
+    }
+
+    // ─── Utilitaires ─────────────────────────────────────────────────────────
+
+    private static void removeArena(MinecraftServer server, UUID playerId) {
+        if (server == null) return;
+        int[] pos = arenaPositions.remove(playerId);
+        if (pos == null) return;
+        int cx = pos[0], cz = pos[1];
+        ServerLevel level = server.overworld();
+        int r  = ARENA_HALF;
+        int wh = WALL_HEIGHT;
+
+        // Vide tous les blocs de l'arène (sol + murs + toit glowstone)
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                for (int dy = 0; dy <= wh + 2; dy++) {
+                    level.setBlock(new BlockPos(cx + dx, ARENA_Y + dy, cz + dz),
+                        Blocks.AIR.defaultBlockState(), 3);
+                }
+            }
+        }
+    }
+
+    private static void restoreOneBlock(MinecraftServer server,
+                                         PlayerDataManager.PlayerOneBlockData data) {
+        ServerLevel level = server.overworld();
+        // Remet le bloc correspondant à la phase actuelle
+        net.minecraft.world.level.block.Block block =
+            data.getCurrentPhase().getRandomBlock(new java.util.Random());
+        level.setBlock(data.blockPos, block.defaultBlockState(), 3);
+    }
+
+    private static void teleportToIsland(ServerPlayer player,
+                                          PlayerDataManager.PlayerOneBlockData data,
+                                          MinecraftServer server) {
+        player.teleportTo(server.overworld(),
+            data.blockPos.getX() + 0.5,
+            data.blockPos.getY() + 1.5,
+            data.blockPos.getZ() + 0.5,
+            Set.of(), player.getYRot(), player.getXRot(), true);
     }
 }

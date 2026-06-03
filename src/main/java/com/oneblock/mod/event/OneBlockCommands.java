@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.oneblock.mod.OneBlockMod;
 import com.oneblock.mod.achievement.AchievementManager;
+import com.oneblock.mod.boss.BossManager;
 import com.oneblock.mod.challenge.ChallengeManager;
 import com.oneblock.mod.cosmetic.CosmeticManager;
 import com.oneblock.mod.data.CollectionTracker;
@@ -243,6 +244,17 @@ public class OneBlockCommands {
             Commands.literal("succes")
                 .executes(ctx -> {
                     AchievementManager.showAchievements(ctx.getSource().getPlayerOrException());
+                    return 1;
+                })
+        );
+
+        // ── /boss ─────────────────────────────────────────────────────────────
+        dispatcher.register(
+            Commands.literal("boss")
+                .executes(ctx -> {
+                    ServerPlayer p = ctx.getSource().getPlayerOrException();
+                    MinecraftServer srv = ctx.getSource().getServer();
+                    BossManager.retryBoss(p, srv.overworld());
                     return 1;
                 })
         );

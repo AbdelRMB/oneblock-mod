@@ -84,7 +84,7 @@ public class PlayerEventHandler {
             for (ServerPlayer p : server.getPlayerList().getPlayers()) {
                 ChallengeManager.tick(p, currentDay);
             }
-            BossManager.tickBossBar(server.overworld());
+            if (server != null) BossManager.tickBossBar(server.overworld());
             CosmeticManager.tickTrails(server);
         }
     }
@@ -164,18 +164,19 @@ public class PlayerEventHandler {
 
         ServerLevel level = (ServerLevel) event.getLevel();
 
-        // ── Si boss actif : bloque la progression (drop normal, pas d'incrément) ─
-        if (BossManager.hasBoss(playerId)) {
+        // ── Boss en attente : bloque le OneBlock ─────────────────────────────
+        if (BossManager.hasBossBlocking(playerId)) {
+            BossManager.notifyBlocked(player);
             net.minecraft.world.phys.Vec3 m = player.getDeltaMovement();
             player.setDeltaMovement(m.x, Math.max(m.y, 0.2), m.z);
             nextTickTasks.add(() -> {
                 PlayerOneBlockData d = PlayerDataManager.getOrCreate(playerId, server);
                 OneBlockWorldGen.regenerateBlock(level, brokenPos, d);
             });
-            return; // drop vanilla OK, mais pas d'incrément
+            return;
         }
 
-        // Impulsion vers le haut (évite push/chute lors de la régénération)
+        // Impulsion vers le haut (évite push/chute)
         net.minecraft.world.phys.Vec3 motion = player.getDeltaMovement();
         player.setDeltaMovement(motion.x, Math.max(motion.y, 0.2), motion.z);
 
@@ -189,22 +190,17 @@ public class PlayerEventHandler {
             boolean majorChange = result.oldPhase.getMajorPhaseIndex()
                                   != result.newPhase.getMajorPhaseIndex();
             if (majorChange) {
-                // Boss de phase
-                boolean bossSpawned = BossManager.onMajorPhaseTransition(
-                    player, level, result.oldPhase, result.newPhase);
-                if (bossSpawned) {
-                    // Revert la progression : reste dans l'ancienne phase pendant le boss
-                    PlayerOneBlockData d = PlayerDataManager.getOrCreate(playerId, server);
-                    d.blocksBroken = result.newPhase.startCount - 1;
-                    PlayerDataManager.saveToDisk(d, server);
-                }
-                // Achievement phase
-                AchievementManager.checkPhaseReached(player, result.newPhase.getMajorPhaseIndex());
-            }
-            if (!BossManager.hasBoss(playerId)) {
+                // Déclenche le combat de boss (arène)
+                BossManager.onMajorPhaseTransition(player, level, result.oldPhase, result.newPhase);
+                // Revert : la phase ne s'ouvre qu'après victoire
+                PlayerOneBlockData d = PlayerDataManager.getOrCreate(playerId, server);
+                d.blocksBroken = result.newPhase.startCount - 1;
+                PlayerDataManager.saveToDisk(d, server);
+                // Achievement phase attendra la victoire → déclenché dans onBossVictory
+            } else {
+                // Simple changement de sous-niveau, pas de boss
                 OneBlockWorldGen.notifyPhaseChange(player, result.oldPhase, result.newPhase);
-                CosmeticManager.onPhaseChange(player,
-                    PlayerDataManager.getOrCreate(playerId, server));
+                CosmeticManager.onPhaseChange(player, PlayerDataManager.getOrCreate(playerId, server));
             }
         }
 
@@ -262,16 +258,27 @@ public class PlayerEventHandler {
         );
     }
 
+    // ─── Annulation des drops en arène ───────────────────────────────────────
+
+    @SubscribeEvent
+    public static void onLivingDrops(net.minecraftforge.event.entity.living.LivingDropsEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+        // Si le joueur était en combat de boss → pas de drops (inventaire sera restauré au respawn)
+        if (BossManager.hasArenaInventory(player.getUUID())) {
+            event.setCanceled(true);
+        }
+    }
+
     // ─── Mort d'entité (boss) ────────────────────────────────────────────────
 
     @SubscribeEvent
     public static void onLivingDeath(net.minecraftforge.event.entity.living.LivingDeathEvent event) {
         if (!(event.getEntity() instanceof net.minecraft.world.entity.LivingEntity living)) return;
         if (event.getEntity() instanceof ServerPlayer player) {
-            // Régression uniquement si c'est le boss qui a tué le joueur directement
             net.minecraft.world.entity.Entity killer = event.getSource().getEntity();
             if (killer != null && BossManager.isBossOf(killer.getUUID(), player.getUUID())) {
-                BossManager.onPlayerDeath(player);
+                // Le boss a tué le joueur → défaite
+                BossManager.onPlayerKilledByBoss(player);
             }
             return;
         }
@@ -293,14 +300,17 @@ public class PlayerEventHandler {
         PlayerOneBlockData data = PlayerDataManager.getOrCreate(player.getUUID(), server);
         ServerLevel overworld   = server.overworld();
 
-        // Téléporte au tick suivant (après que le jeu ait fini son propre traitement du respawn)
-        server.execute(() -> player.teleportTo(
-            overworld,
-            data.blockPos.getX() + 0.5,
-            data.blockPos.getY() + 1.5,   // légèrement au-dessus du bloc
-            data.blockPos.getZ() + 0.5,
-            Set.of(), player.getYRot(), player.getXRot(), true
-        ));
+        // Téléporte + restaure l'inventaire si mort en arène boss
+        server.execute(() -> {
+            player.teleportTo(overworld,
+                data.blockPos.getX() + 0.5,
+                data.blockPos.getY() + 1.5,
+                data.blockPos.getZ() + 0.5,
+                Set.of(), player.getYRot(), player.getXRot(), true);
+
+            // Restaure l'inventaire si le joueur était dans l'arène
+            BossManager.onPlayerRespawnAfterDefeat(player);
+        });
     }
 
     // ─── Déconnexion ────────────────────────────────────────────────────────
