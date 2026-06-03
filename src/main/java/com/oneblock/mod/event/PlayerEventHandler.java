@@ -165,6 +165,28 @@ public class PlayerEventHandler {
         );
     }
 
+    // ─── Respawn après mort ──────────────────────────────────────────────────
+
+    @SubscribeEvent
+    public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+
+        MinecraftServer server = (MinecraftServer) player.level().getServer();
+        if (server == null) return;
+
+        PlayerOneBlockData data = PlayerDataManager.getOrCreate(player.getUUID(), server);
+        ServerLevel overworld   = server.overworld();
+
+        // Téléporte au tick suivant (après que le jeu ait fini son propre traitement du respawn)
+        server.execute(() -> player.teleportTo(
+            overworld,
+            data.blockPos.getX() + 0.5,
+            data.blockPos.getY() + 1.5,   // légèrement au-dessus du bloc
+            data.blockPos.getZ() + 0.5,
+            Set.of(), player.getYRot(), player.getXRot(), true
+        ));
+    }
+
     // ─── Déconnexion ────────────────────────────────────────────────────────
 
     @SubscribeEvent
