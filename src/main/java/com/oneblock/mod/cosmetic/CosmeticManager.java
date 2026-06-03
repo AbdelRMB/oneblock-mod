@@ -43,14 +43,29 @@ public class CosmeticManager {
 
     public static void tickTrails(MinecraftServer server) {
         ServerLevel level = server.overworld();
+        long gameTime = level.getGameTime();
 
-        for (UUID id : trailEnabled) {
-            ServerPlayer player = server.getPlayerList().getPlayer(id);
-            if (player == null) continue;
-            OneBlockPhase phase = PlayerDataManager.getOrCreate(id, server).getCurrentPhase();
-            level.sendParticles(getTrailParticle(phase),
-                player.getX(), player.getY() + 0.5, player.getZ(),
-                3, 0.3, 0.3, 0.3, 0.01);
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            UUID id = player.getUUID();
+            PlayerDataManager.PlayerOneBlockData data =
+                PlayerDataManager.getOrCreate(id, server);
+            OneBlockPhase phase = data.getCurrentPhase();
+
+            // Trail de particules impressionnant (si activé)
+            if (trailEnabled.contains(id)) {
+                spawnImpressiveTrail(level, player, phase, gameTime);
+            }
+
+            // Titre en action bar toutes les 3 secondes (60 ticks)
+            // → le joueur voit son propre rang au-dessus de sa barre de vie
+            if (gameTime % 60 == 0) {
+                String prestige = PrestigeManager.getPrestigePrefix(id);
+                String phaseTitle = getPhaseTitle(phase);
+                if (!phaseTitle.isEmpty()) {
+                    player.sendSystemMessage(
+                        Component.literal(prestige + phaseTitle), true);
+                }
+            }
         }
 
         // Neige pour les îles en thème winter (toutes les 10 ticks)
@@ -78,6 +93,75 @@ public class CosmeticManager {
         }
     }
 
+    /**
+     * Trail impressionnant : 3 anneaux en spirale autour du joueur + particules montantes.
+     * Chaque phase a ses propres particules et couleurs.
+     */
+    private static void spawnImpressiveTrail(ServerLevel level, ServerPlayer player,
+                                              OneBlockPhase phase, long gameTime) {
+        double px = player.getX();
+        double py = player.getY() + 0.5;
+        double pz = player.getZ();
+
+        ParticleOptions main   = getTrailParticle(phase);
+        ParticleOptions accent = getAccentParticle(phase);
+
+        // ── Anneau principal (rayon 1.2, tourne dans le temps) ────────────────
+        double angle1 = (gameTime * 0.15) % (2 * Math.PI);
+        for (int i = 0; i < 8; i++) {
+            double a = angle1 + i * (Math.PI / 4);
+            double rx = Math.cos(a) * 1.2;
+            double rz = Math.sin(a) * 1.2;
+            level.sendParticles(main, px + rx, py, pz + rz, 1, 0, 0.02, 0, 0);
+        }
+
+        // ── Anneau accent (rayon 0.7, tourne en sens inverse) ─────────────────
+        double angle2 = -(gameTime * 0.12) % (2 * Math.PI);
+        for (int i = 0; i < 6; i++) {
+            double a = angle2 + i * (Math.PI / 3);
+            double rx = Math.cos(a) * 0.7;
+            double rz = Math.sin(a) * 0.7;
+            level.sendParticles(accent, px + rx, py + 0.3, pz + rz, 1, 0, 0.03, 0, 0);
+        }
+
+        // ── Spirale montante sous le joueur ───────────────────────────────────
+        double angle3 = (gameTime * 0.20) % (2 * Math.PI);
+        for (int i = 0; i < 4; i++) {
+            double a  = angle3 + i * (Math.PI / 2);
+            double t  = (gameTime % 20) / 20.0;
+            double ry = -0.5 + t;
+            double rx = Math.cos(a) * (0.3 + t * 0.5);
+            double rz = Math.sin(a) * (0.3 + t * 0.5);
+            level.sendParticles(main, px + rx, py + ry, pz + rz, 1, 0, 0.05, 0, 0.02);
+        }
+
+        // ── Éclats ponctuels aléatoires (toutes les 5 ticks) ─────────────────
+        if (gameTime % 5 == 0) {
+            level.sendParticles(accent,
+                px + (Math.random() - 0.5) * 2,
+                py + Math.random() * 2,
+                pz + (Math.random() - 0.5) * 2,
+                1, 0, 0.1, 0, 0.05);
+        }
+    }
+
+    private static ParticleOptions getAccentParticle(OneBlockPhase phase) {
+        return switch (phase.getMajorPhaseIndex()) {
+            case 0  -> ParticleTypes.COMPOSTER;      // Plains
+            case 1  -> ParticleTypes.CRIT;           // Underground
+            case 2  -> ParticleTypes.ITEM_SNOWBALL;  // Winter
+            case 3  -> ParticleTypes.SPLASH;         // Ocean
+            case 4  -> ParticleTypes.FALLING_NECTAR; // Jungle
+            case 5  -> ParticleTypes.MYCELIUM;       // Swamp
+            case 6  -> ParticleTypes.CRIT;           // Dungeon
+            case 7  -> ParticleTypes.POOF;            // Desert
+            case 8  -> ParticleTypes.LAVA;           // Nether
+            case 9  -> ParticleTypes.NAUTILUS;       // Plenty
+            case 10 -> ParticleTypes.REVERSE_PORTAL; // End
+            default -> ParticleTypes.CRIT;
+        };
+    }
+
     private static ParticleOptions getTrailParticle(OneBlockPhase phase) {
         return switch (phase.getMajorPhaseIndex()) {
             case 0  -> ParticleTypes.HAPPY_VILLAGER;
@@ -98,17 +182,8 @@ public class CosmeticManager {
     // ─── Titres (au-dessus de la tête via scoreboard team) ───────────────────
 
     public static void toggleTitle(ServerPlayer player) {
-        UUID id = player.getUUID();
-        if (titleEnabled.remove(id)) {
-            removeTeamTitle(player);
-            player.sendSystemMessage(Component.literal("§7Titre §cdésactivé§7."));
-        } else {
-            titleEnabled.add(id);
-            applyTeamTitle(player,
-                PlayerDataManager.getOrCreate(id,
-                    (MinecraftServer) player.level().getServer()));
-            player.sendSystemMessage(Component.literal("§7Titre §aactivé§7."));
-        }
+        player.sendSystemMessage(Component.literal(
+            "§7Les titres sont §atoujours actifs §7— visibles par tous les joueurs."));
     }
 
     /**
@@ -116,8 +191,7 @@ public class CosmeticManager {
      * ET dans la tab-list comme prefix.
      */
     public static void applyTeamTitle(ServerPlayer player, PlayerDataManager.PlayerOneBlockData data) {
-        if (!titleEnabled.contains(player.getUUID())) return;
-
+        // Titres toujours actifs pour tous
         String prestige = PrestigeManager.getPrestigePrefix(player.getUUID());
         String phase    = getPhaseTitle(data.getCurrentPhase());
         String full     = prestige + phase;
@@ -149,7 +223,7 @@ public class CosmeticManager {
         }
     }
 
-    private static String getPhaseTitle(OneBlockPhase phase) {
+    public static String getPhaseTitle(OneBlockPhase phase) {
         return switch (phase.getMajorPhaseIndex()) {
             case 0  -> "§7[Survivant]";
             case 1  -> "§7[Mineur]";
@@ -168,17 +242,14 @@ public class CosmeticManager {
 
     /** Appelé quand la phase change pour mettre à jour le titre au-dessus de la tête. */
     public static void onPhaseChange(ServerPlayer player, PlayerDataManager.PlayerOneBlockData data) {
-        if (titleEnabled.contains(player.getUUID())) {
-            applyTeamTitle(player, data);
-        }
+        applyTeamTitle(player, data); // toujours appliquer
     }
 
     public static String getFullTitle(UUID id, PlayerDataManager.PlayerOneBlockData data) {
-        if (!titleEnabled.contains(id)) return "";
         return PrestigeManager.getPrestigePrefix(id) + getPhaseTitle(data.getCurrentPhase());
     }
 
-    public static boolean isTitleEnabled(UUID id) { return titleEnabled.contains(id); }
+    public static boolean isTitleEnabled(UUID id) { return true; } // toujours actif
 
     // ─── Thèmes d'île ────────────────────────────────────────────────────────
 

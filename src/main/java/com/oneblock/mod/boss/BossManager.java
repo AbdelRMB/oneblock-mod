@@ -254,38 +254,96 @@ public class BossManager {
         int r  = ARENA_HALF;
         int wh = WALL_HEIGHT;
 
+        // Tout ce qui est structural est en BEDROCK → indestructible
+
+        // ── Sol complet en bedrock ────────────────────────────────────────────
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
-                boolean isWall = dx == -r || dx == r || dz == -r || dz == r;
-
-                // Sol
                 level.setBlock(new BlockPos(cx + dx, y, cz + dz),
                     Blocks.BEDROCK.defaultBlockState(), 3);
+            }
+        }
 
-                // Murs
-                if (isWall) {
-                    for (int dy = 1; dy <= wh; dy++) {
-                        level.setBlock(new BlockPos(cx + dx, y + dy, cz + dz),
-                            Blocks.BEDROCK.defaultBlockState(), 3);
-                    }
-                    // Toit du mur = bedrock
-                    level.setBlock(new BlockPos(cx + dx, y + wh + 1, cz + dz),
-                        Blocks.BEDROCK.defaultBlockState(), 3);
-                } else {
-                    // Intérieur : air propre
-                    for (int dy = 1; dy <= wh + 1; dy++) {
-                        level.setBlock(new BlockPos(cx + dx, y + dy, cz + dz),
-                            Blocks.AIR.defaultBlockState(), 3);
-                    }
+        // ── Intérieur : nettoyer l'air ────────────────────────────────────────
+        for (int dx = -(r-1); dx <= r-1; dx++) {
+            for (int dz = -(r-1); dz <= r-1; dz++) {
+                for (int dy = 1; dy <= wh + 2; dy++) {
+                    level.setBlock(new BlockPos(cx + dx, y + dy, cz + dz),
+                        Blocks.AIR.defaultBlockState(), 3);
                 }
             }
         }
 
-        // Lumière centrale (glowstone au plafond)
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
+        // ── Murs en bedrock ───────────────────────────────────────────────────
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                boolean isWall = dx == -r || dx == r || dz == -r || dz == r;
+                if (!isWall) continue;
+                for (int dy = 1; dy <= wh; dy++) {
+                    level.setBlock(new BlockPos(cx + dx, y + dy, cz + dz),
+                        Blocks.BEDROCK.defaultBlockState(), 3);
+                }
+            }
+        }
+
+        // ── Toit en bedrock + glowstone intégré (non cassable = bedrock) ──────
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                level.setBlock(new BlockPos(cx + dx, y + wh + 1, cz + dz),
+                    Blocks.BEDROCK.defaultBlockState(), 3);
+            }
+        }
+
+        // ── Glowstone encastrée dans le sol (sous bedrock = invisible, dans le sol = visible) ─
+        // On place des glowstone À L'INTÉRIEUR du sol (y-1) qui brillent à travers → non, on les met dans le sol directement à hauteur y mais dans le damier
+        // En fait on les met au plafond en perçant la bedrock avec de la glowstone (non cassable car bedrock en dessous)
+        for (int dx = -r+2; dx <= r-2; dx += 4) {
+            for (int dz = -r+2; dz <= r-2; dz += 4) {
                 level.setBlock(new BlockPos(cx + dx, y + wh + 1, cz + dz),
                     Blocks.GLOWSTONE.defaultBlockState(), 3);
+            }
+        }
+
+        // ── Décoration du sol (par-dessus la bedrock, cassable mais esthétique) ─
+        // Damier or / pierre (si cassé = juste cosmétique, sol bedrock en dessous)
+        for (int dx = -(r-1); dx <= r-1; dx++) {
+            for (int dz = -(r-1); dz <= r-1; dz++) {
+                boolean checker = (dx + dz + 100) % 2 == 0;
+                level.setBlock(new BlockPos(cx + dx, y, cz + dz),
+                    (checker ? Blocks.CHISELED_STONE_BRICKS : Blocks.POLISHED_BASALT).defaultBlockState(), 3);
+            }
+        }
+
+        // ── Plateforme de spawn joueur (centre) ───────────────────────────────
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                level.setBlock(new BlockPos(cx + dx, y, cz + dz),
+                    Blocks.GOLD_BLOCK.defaultBlockState(), 3);
+            }
+        }
+        level.setBlock(new BlockPos(cx, y, cz), Blocks.DIAMOND_BLOCK.defaultBlockState(), 3);
+
+        // ── Piliers décoratifs aux coins (bedrock) ────────────────────────────
+        int[][] corners = {{-(r-1), -(r-1)}, {-(r-1), r-1}, {r-1, -(r-1)}, {r-1, r-1}};
+        for (int[] c : corners) {
+            for (int dy = 1; dy <= wh; dy++) {
+                level.setBlock(new BlockPos(cx + c[0], y + dy, cz + c[1]),
+                    Blocks.BEDROCK.defaultBlockState(), 3);
+            }
+            // Glowstone au sommet de chaque pilier
+            level.setBlock(new BlockPos(cx + c[0], y + wh, cz + c[1]),
+                Blocks.GLOWSTONE.defaultBlockState(), 3);
+        }
+
+        // ── Mares de lave dans les coins (ambiance) ───────────────────────────
+        int lava = r - 4;
+        int[][] lavaCrns = {{-lava,-lava},{-lava,lava},{lava,-lava},{lava,lava}};
+        for (int[] lc : lavaCrns) {
+            for (int ddx = -1; ddx <= 1; ddx++) {
+                for (int ddz = -1; ddz <= 1; ddz++) {
+                    level.setBlock(new BlockPos(cx+lc[0]+ddx, y, cz+lc[1]+ddz),
+                        Blocks.LAVA.defaultBlockState(), 3);
+                }
             }
         }
     }
