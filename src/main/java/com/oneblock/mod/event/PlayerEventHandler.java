@@ -263,9 +263,10 @@ public class PlayerEventHandler {
     @SubscribeEvent
     public static void onLivingDrops(net.minecraftforge.event.entity.living.LivingDropsEvent event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
-        // Si le joueur était en combat de boss → pas de drops (inventaire sera restauré au respawn)
+        // Si le joueur était en combat de boss → supprime tous les drops
+        // (inventaire sera restauré au respawn)
         if (BossManager.hasArenaInventory(player.getUUID())) {
-            event.setCanceled(true);
+            event.getDrops().clear();
         }
     }
 
