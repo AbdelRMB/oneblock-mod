@@ -6,6 +6,9 @@ import com.oneblock.mod.data.PlayerDataManager;
 import com.oneblock.mod.economy.CoinManager;
 import com.oneblock.mod.world.OneBlockPhase;
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtAccounter;
+import net.minecraft.nbt.NbtIo;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
@@ -23,8 +26,12 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Système de boss de phase — arène dédiée.
@@ -41,8 +48,8 @@ public class BossManager {
 
     // ─── Constantes arène ────────────────────────────────────────────────────
     private static final int ARENA_Y       = 150;   // altitude de l'arène
-    private static final int ARENA_HALF    = 15;    // demi-côté → arène 30×30
-    private static final int WALL_HEIGHT   = 7;     // hauteur des murs
+    private static final int ARENA_HALF    = 20;    // demi-côté → arène 40×40
+    private static final int WALL_HEIGHT   = 10;    // hauteur des murs
 
     // ─── Mobs par phase majeure ───────────────────────────────────────────────
     private static final String[] BOSS_MOBS = {
@@ -84,6 +91,10 @@ public class BossManager {
     private static final Map<UUID, UUID>           activeBossEntity  = new ConcurrentHashMap<>();
     /** Position centre de l'arène par joueur [cx, cz]. */
     private static final Map<UUID, int[]>          arenaPositions    = new ConcurrentHashMap<>();
+    /** File de blocs à supprimer progressivement (50 blocs/tick max). */
+    private static final Queue<BlockPos>           arenaRemoveQueue  = new ConcurrentLinkedQueue<>();
+    private static ServerLevel                     arenaRemoveLevel  = null;
+    private static final int BLOCKS_PER_TICK = 50;
 
     // ─── API publique ─────────────────────────────────────────────────────────
 
@@ -122,11 +133,50 @@ public class BossManager {
             player.sendSystemMessage(Component.literal("§cTu es déjà dans une arène !"));
             return;
         }
+
         FightState state = pendingFights.get(id);
+
+        // Auto-détection : si le OneBlock est en bedrock mais pas de boss en mémoire
+        // (cas d'un redémarrage avant que le système de persistence existait)
         if (state == null) {
-            player.sendSystemMessage(Component.literal("§7Aucun boss en attente pour toi."));
-            return;
+            PlayerDataManager.PlayerOneBlockData data =
+                PlayerDataManager.getOrCreate(id, level.getServer());
+            boolean oneBlockIsBedrock = level.getBlockState(data.blockPos)
+                .is(Blocks.BEDROCK);
+
+            if (oneBlockIsBedrock) {
+                // Reconstruit l'état du boss à partir de la progression actuelle
+                OneBlockPhase currentPhase = data.getCurrentPhase();
+                int majorIdx = currentPhase.getMajorPhaseIndex();
+
+                // Cherche la prochaine phase majeure
+                int targetMajorIdx = majorIdx + 1;
+                OneBlockPhase targetPhase = null;
+                for (OneBlockPhase p : OneBlockPhase.values()) {
+                    if (p.getMajorPhaseIndex() == targetMajorIdx) {
+                        targetPhase = p;
+                        break;
+                    }
+                }
+
+                if (targetPhase == null || majorIdx < 0 || majorIdx >= BOSS_MOBS.length) {
+                    player.sendSystemMessage(Component.literal(
+                        "§cImpossible de détecter le boss. Contacte un admin."));
+                    return;
+                }
+
+                state = new FightState(currentPhase, targetPhase, majorIdx);
+                pendingFights.put(id, state);
+                savePendingFight(id, state, level.getServer());
+
+                player.sendSystemMessage(Component.literal(
+                    "§7Boss détecté automatiquement. Lancement du combat..."));
+            } else {
+                player.sendSystemMessage(Component.literal("§7Aucun boss en attente pour toi."));
+                return;
+            }
         }
+
         startFight(player, level, state);
     }
 
@@ -145,6 +195,10 @@ public class BossManager {
 
         activeFights.put(id, state);
         pendingFights.remove(id);
+
+        // Sauvegarde immédiatement l'état du boss sur disque
+        // → si le serveur redémarre pendant le combat, le joueur pourra refaire /boss
+        savePendingFight(id, state, level.getServer());
 
         // 1. Sauvegarde l'inventaire
         saveInventory(player);
@@ -322,8 +376,10 @@ public class BossManager {
         data.blocksBroken = state.targetPhase().startCount;
         PlayerDataManager.saveToDisk(data, server);
 
-        // Restaure le OneBlock
+        // Restaure le OneBlock + supprime le fichier boss en attente
         restoreOneBlock(server, data);
+        clearPendingFightFile(playerId, server);
+        pendingFights.remove(playerId);
         // Supprime l'arène au tick suivant (assure que les chunks sont bien chargés)
         final UUID pid = playerId;
         server.execute(() -> removeArena(server, pid));
@@ -351,8 +407,9 @@ public class BossManager {
     private static void onBossDefeat(ServerPlayer player, FightState state, MinecraftServer server) {
         UUID id = player.getUUID();
 
-        // Passe en attente pour /boss retry
+        // Passe en attente pour /boss retry (persisté sur disque)
         pendingFights.put(id, state);
+        if (server != null) savePendingFight(id, state, server);
 
         // Despawn le boss
         UUID bossId = activeBossEntity.get(id);
@@ -397,15 +454,30 @@ public class BossManager {
     // ─── Tick boss bar ────────────────────────────────────────────────────────
 
     public static void tickBossBar(ServerLevel level) {
+        // Mise à jour des boss bars actives
         for (Map.Entry<UUID, UUID> entry : activeBossEntity.entrySet()) {
             UUID playerId = entry.getKey();
             UUID bossId   = entry.getValue();
             ServerBossEvent bar = bossBars.get(playerId);
             if (bar == null) continue;
-
             net.minecraft.world.entity.Entity e = level.getEntity(bossId);
             if (e instanceof LivingEntity living) {
                 bar.setProgress(Math.max(0f, living.getHealth() / living.getMaxHealth()));
+            }
+        }
+
+        // Suppression progressive de l'arène : 50 blocs par tick max
+        if (!arenaRemoveQueue.isEmpty() && arenaRemoveLevel != null) {
+            int done = 0;
+            while (!arenaRemoveQueue.isEmpty() && done < BLOCKS_PER_TICK) {
+                BlockPos pos = arenaRemoveQueue.poll();
+                if (pos != null) {
+                    arenaRemoveLevel.setBlock(pos, Blocks.AIR.defaultBlockState(), 2);
+                    done++;
+                }
+            }
+            if (arenaRemoveQueue.isEmpty()) {
+                arenaRemoveLevel = null;
             }
         }
     }
@@ -426,7 +498,69 @@ public class BossManager {
         savedInventories.remove(playerId);
         savedArmor.remove(playerId);
         arenaPositions.remove(playerId);
-        // On garde pendingFights → joueur peut réessayer à la reconnexion
+        // On garde pendingFights en mémoire ET sur disque → réessai possible à la reconnexion
+    }
+
+    // ─── Persistence du boss en attente ──────────────────────────────────────
+
+    /** Sauvegarde l'état "boss en attente" sur disque. */
+    private static void savePendingFight(UUID id, FightState state, MinecraftServer server) {
+        try {
+            File dir = getSaveDir(server); dir.mkdirs();
+            CompoundTag tag = new CompoundTag();
+            tag.putInt("MajorIdx",         state.majorIdx());
+            tag.putInt("TargetStartCount", state.targetPhase().startCount);
+            NbtIo.writeCompressed(tag, dir.toPath().resolve(id + "_boss.dat"));
+        } catch (IOException e) {
+            OneBlockMod.LOGGER.error("[OneBlock] Erreur sauvegarde boss {}: {}", id, e.getMessage());
+        }
+    }
+
+    /** Charge l'état "boss en attente" depuis le disque au login. */
+    public static void loadPendingFight(UUID id, MinecraftServer server) {
+        try {
+            Path path = getSaveDir(server).toPath().resolve(id + "_boss.dat");
+            if (!path.toFile().exists()) return;
+
+            CompoundTag tag = NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
+            int majorIdx    = tag.getInt("MajorIdx").orElse(-1);
+            int targetStart = tag.getInt("TargetStartCount").orElse(-1);
+            if (majorIdx < 0 || targetStart < 0) return;
+
+            OneBlockPhase target   = OneBlockPhase.fromCount(targetStart);
+            // oldPhase = dernière sous-phase de la phase majeure précédente
+            OneBlockPhase oldPhase = findLastSubLevelOfMajorPhase(majorIdx);
+
+            FightState state = new FightState(oldPhase, target, majorIdx);
+            pendingFights.put(id, state);
+
+            OneBlockMod.LOGGER.info("[OneBlock] Boss en attente chargé pour {} (phase {})",
+                id, target.displayName);
+        } catch (IOException e) {
+            OneBlockMod.LOGGER.error("[OneBlock] Erreur chargement boss {}: {}", id, e.getMessage());
+        }
+    }
+
+    /** Supprime le fichier de boss en attente (après victoire). */
+    private static void clearPendingFightFile(UUID id, MinecraftServer server) {
+        try {
+            Path path = getSaveDir(server).toPath().resolve(id + "_boss.dat");
+            path.toFile().delete();
+        } catch (Exception e) {
+            OneBlockMod.LOGGER.warn("[OneBlock] Impossible de supprimer boss.dat : {}", e.getMessage());
+        }
+    }
+
+    private static OneBlockPhase findLastSubLevelOfMajorPhase(int majorIdx) {
+        OneBlockPhase last = OneBlockPhase.PLAINS_1;
+        for (OneBlockPhase p : OneBlockPhase.values()) {
+            if (p.getMajorPhaseIndex() == majorIdx) last = p;
+        }
+        return last;
+    }
+
+    private static File getSaveDir(MinecraftServer server) {
+        return server.getServerDirectory().resolve("oneblock_data").toFile();
     }
 
     // ─── Inventaire ──────────────────────────────────────────────────────────
@@ -482,19 +616,19 @@ public class BossManager {
         int[] pos = arenaPositions.remove(playerId);
         if (pos == null) return;
         int cx = pos[0], cz = pos[1];
-        ServerLevel level = server.overworld();
         int r  = ARENA_HALF;
         int wh = WALL_HEIGHT;
 
-        // Vide tous les blocs de l'arène (sol + murs + toit glowstone)
+        // Enfile tous les blocs à supprimer — traitement progressif dans tickBossBar
+        arenaRemoveLevel = server.overworld();
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
                 for (int dy = 0; dy <= wh + 2; dy++) {
-                    level.setBlock(new BlockPos(cx + dx, ARENA_Y + dy, cz + dz),
-                        Blocks.AIR.defaultBlockState(), 3);
+                    arenaRemoveQueue.add(new BlockPos(cx + dx, ARENA_Y + dy, cz + dz));
                 }
             }
         }
+        OneBlockMod.LOGGER.info("[OneBlock] Arène mise en file de suppression ({} blocs)", arenaRemoveQueue.size());
     }
 
     private static void restoreOneBlock(MinecraftServer server,

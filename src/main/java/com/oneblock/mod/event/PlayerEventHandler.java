@@ -107,6 +107,7 @@ public class PlayerEventHandler {
         CoinManager.loadFromDisk(playerId, server);
         AchievementManager.loadFromDisk(playerId, server);
         PrestigeManager.loadFromDisk(playerId, server);
+        BossManager.loadPendingFight(playerId, server);
 
         server.execute(() -> {
             ServerLevel level = server.overworld();
@@ -140,6 +141,16 @@ public class PlayerEventHandler {
 
             // Crée ou restaure la boss bar de progression
             updateBossBar(player, data);
+
+            // Prévient le joueur s'il a un boss en attente
+            if (BossManager.hasBossBlocking(playerId)) {
+                // S'assure que le OneBlock est bien en bedrock (au cas où redémarrage)
+                if (!level.getBlockState(data.blockPos).is(Blocks.BEDROCK)) {
+                    level.setBlock(data.blockPos, Blocks.BEDROCK.defaultBlockState(), 3);
+                }
+                player.sendSystemMessage(Component.literal(
+                    "§c⚔ Tu as un boss en attente ! §7Tape §f/boss §7pour entrer dans l'arène."));
+            }
         });
 
         OneBlockMod.LOGGER.info("[OneBlock] Joueur {} connecté (nouveau: {}, bloc: {})",
