@@ -1,6 +1,7 @@
 package com.oneblock.mod.event;
 
 import com.oneblock.mod.OneBlockMod;
+import com.oneblock.mod.challenge.ChallengeManager;
 import com.oneblock.mod.data.IslandExtensionManager;
 import com.oneblock.mod.data.PlayerDataManager;
 import com.oneblock.mod.data.PlayerDataManager.PlayerOneBlockData;
@@ -116,6 +117,9 @@ public class IslandExpansionHandler {
         if (dist > ISLAND_RADIUS) return;
 
         int newLevel = IslandExtensionManager.addBlock(playerId, server);
+
+        // Challenge : progression place
+        ChallengeManager.onBlockPlaced(player);
 
         if (newLevel >= 0) {
             // Montée de niveau !

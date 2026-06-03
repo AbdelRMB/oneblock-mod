@@ -1,19 +1,24 @@
 package com.oneblock.mod.event;
 
 import com.oneblock.mod.OneBlockMod;
+import com.oneblock.mod.challenge.ChallengeManager;
 import com.oneblock.mod.config.OneBlockConfig;
+import com.oneblock.mod.data.CollectionTracker;
 import com.oneblock.mod.data.PlayerDataManager;
 import com.oneblock.mod.data.PlayerDataManager.PlayerOneBlockData;
 import com.oneblock.mod.data.PlayerDataManager.PhaseChangeResult;
 import com.oneblock.mod.world.OneBlockPhase;
 import com.oneblock.mod.world.OneBlockWorldGen;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerBossEvent;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.BossEvent;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraftforge.event.entity.living.LivingFallEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
@@ -21,10 +26,12 @@ import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.listener.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.server.ServerLifecycleHooks;
 
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,6 +46,11 @@ public class PlayerEventHandler {
     /** Boss bar par joueur — affiche la progression OneBlock en haut de l'écran. */
     private static final Map<UUID, ServerBossEvent> bossBars = new ConcurrentHashMap<>();
 
+    private static final Random RARE_RANDOM = new Random();
+
+    /** 5 minutes = 6000 ticks. */
+    private static final int AUTO_SAVE_INTERVAL = 6000;
+
     // ─── Tick ───────────────────────────────────────────────────────────────
 
     @SubscribeEvent
@@ -46,6 +58,27 @@ public class PlayerEventHandler {
         Runnable task;
         while ((task = nextTickTasks.poll()) != null) {
             task.run();
+        }
+
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server == null) return;
+        long gameTime = server.overworld().getGameTime();
+
+        // ── Auto-save toutes les 5 minutes ──────────────────────────────────
+        if (gameTime % AUTO_SAVE_INTERVAL == 0) {
+            for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+                PlayerOneBlockData d = PlayerDataManager.getOrCreate(p.getUUID(), server);
+                PlayerDataManager.saveToDisk(d, server);
+                CollectionTracker.saveToDisk(p.getUUID(), server);
+            }
+        }
+
+        // ── Challenges : vérification du jour pour chaque joueur ─────────────
+        if (gameTime % 40 == 0) {
+            long currentDay = gameTime / 24000L;
+            for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+                ChallengeManager.tick(p, currentDay);
+            }
         }
     }
 
@@ -61,6 +94,9 @@ public class PlayerEventHandler {
         UUID playerId = player.getUUID();
         boolean isNewPlayer = !hasExistingData(playerId, server);
         PlayerOneBlockData data = PlayerDataManager.getOrCreate(playerId, server);
+
+        // Charge la collection et les données challenges
+        CollectionTracker.loadFromDisk(playerId, server);
 
         server.execute(() -> {
             ServerLevel level = server.overworld();
@@ -118,19 +154,28 @@ public class PlayerEventHandler {
 
         ServerLevel level = (ServerLevel) event.getLevel();
 
-        // Impulsion vers le haut : le joueur monte légèrement au moment du break
-        // → quand le bloc régénère au tick suivant, le joueur est au-dessus
-        //   et ne se retrouve plus à l'intérieur (évite le push et la chute).
+        // Impulsion vers le haut (évite push/chute lors de la régénération)
         net.minecraft.world.phys.Vec3 motion = player.getDeltaMovement();
         player.setDeltaMovement(motion.x, Math.max(motion.y, 0.2), motion.z);
 
-        // Incrémente la progression
+        // ── Collection : enregistre le bloc cassé ────────────────────────────
+        CollectionTracker.recordBlock(playerId, event.getState().getBlock(), server);
+
+        // ── Incrémente la progression ─────────────────────────────────────────
         PhaseChangeResult result = PlayerDataManager.incrementBlocksBroken(playerId, server);
         if (result.changed) {
             OneBlockWorldGen.notifyPhaseChange(player, result.oldPhase, result.newPhase);
         }
 
-        // Régénère le bloc au tick suivant (vanilla gère le break et les drops normalement)
+        // ── Challenge : progression break ─────────────────────────────────────
+        ChallengeManager.onBlockBroken(player);
+
+        // ── Bloc rare (1% de chance) ──────────────────────────────────────────
+        if (RARE_RANDOM.nextFloat() < 0.01f) {
+            triggerRareEvent(player, level, brokenPos, data.getCurrentPhase());
+        }
+
+        // ── HUD + régénération ────────────────────────────────────────────────
         PlayerOneBlockData freshData = PlayerDataManager.getOrCreate(playerId, server);
         updateBossBar(player, freshData);
 
@@ -200,12 +245,18 @@ public class PlayerEventHandler {
         PlayerOneBlockData data = PlayerDataManager.getOrCreate(player.getUUID(), server);
         PlayerDataManager.saveToDisk(data, server);
 
-        // Retire le joueur de sa boss bar et nettoie
         UUID playerId = player.getUUID();
+
+        // Sauvegarde collection
+        CollectionTracker.saveToDisk(playerId, server);
+        CollectionTracker.clearCache(playerId);
+
+        // Nettoie les challenges en mémoire
+        ChallengeManager.clearPlayer(playerId);
+
+        // Retire la boss bar
         ServerBossEvent bar = bossBars.remove(playerId);
-        if (bar != null) {
-            bar.removePlayer(player);
-        }
+        if (bar != null) bar.removePlayer(player);
 
         OneBlockMod.LOGGER.info("[OneBlock] Données sauvegardées pour {}", player.getName().getString());
     }
@@ -274,6 +325,43 @@ public class PlayerEventHandler {
         if (d.startsWith("§6")) return BossEvent.BossBarColor.YELLOW;  // Plenty
         if (d.startsWith("§5")) return BossEvent.BossBarColor.PURPLE;  // The End
         return BossEvent.BossBarColor.WHITE;
+    }
+
+    // ─── Bloc rare ───────────────────────────────────────────────────────────
+
+    /**
+     * Déclenche un événement "bloc rare" : particules + message + bonus d'items.
+     * Probabilité : 1% à chaque break de OneBlock.
+     */
+    private static void triggerRareEvent(ServerPlayer player, ServerLevel level,
+                                          BlockPos pos, OneBlockPhase phase) {
+        // Particules dorées autour du bloc
+        level.sendParticles(
+            ParticleTypes.TOTEM_OF_UNDYING,
+            pos.getX() + 0.5, pos.getY() + 1.5, pos.getZ() + 0.5,
+            30, 0.3, 0.5, 0.3, 0.1
+        );
+
+        // Message
+        player.sendSystemMessage(Component.literal(
+            "§6§l✦ BLOC RARE ! §r§e+bonus selon ta phase §6§l✦"));
+
+        // Bonus d'items selon la phase
+        ItemStack bonus = getRareBonus(phase);
+        player.getInventory().add(bonus.copy());
+        player.sendSystemMessage(Component.literal(
+            "§7Tu as reçu : §e" + bonus.getCount() + "x "
+            + Component.translatable(bonus.getItem().getDescriptionId()).getString()));
+    }
+
+    private static ItemStack getRareBonus(OneBlockPhase phase) {
+        int ordinal = phase.ordinal();
+        if (ordinal <= 3)  return new ItemStack(Items.IRON_INGOT, 4);
+        if (ordinal <= 7)  return new ItemStack(Items.GOLD_INGOT, 3);
+        if (ordinal <= 11) return new ItemStack(Items.DIAMOND, 1);
+        if (ordinal <= 15) return new ItemStack(Items.EMERALD, 2);
+        if (ordinal <= 19) return new ItemStack(Items.DIAMOND, 2);
+        return new ItemStack(Items.NETHERITE_SCRAP, 1);
     }
 
     // ─── Utilitaires ────────────────────────────────────────────────────────

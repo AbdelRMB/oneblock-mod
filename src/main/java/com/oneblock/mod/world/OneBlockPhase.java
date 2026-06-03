@@ -326,6 +326,11 @@ public enum OneBlockPhase {
         return this == END_4;
     }
 
+    /** Retourne la liste des blocs ajoutés UNIQUEMENT par ce sous-niveau. */
+    public List<Block> getNewBlocksList() {
+        return Arrays.stream(newBlocks).map(wb -> wb.block).toList();
+    }
+
     public static class WeightedBlock {
         public final Block block;
         public final int weight;

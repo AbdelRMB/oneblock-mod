@@ -4,6 +4,9 @@ import com.oneblock.mod.OneBlockMod;
 import com.oneblock.mod.data.PlayerDataManager;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
+import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
+import net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.Block;
@@ -59,9 +62,28 @@ public class OneBlockWorldGen {
         }
     }
 
+    /**
+     * Affiche un grand titre plein écran quand la phase change.
+     * Titre    : nom de la nouvelle phase (coloré)
+     * Sous-titre : description courte
+     */
     public static void notifyPhaseChange(ServerPlayer player, OneBlockPhase oldPhase, OneBlockPhase newPhase) {
-        player.sendSystemMessage(Component.literal("§6§l✦ Nouvelle phase : " + newPhase.displayName + " §6§l✦"));
-        player.sendSystemMessage(Component.literal("§7(Phase précédente : " + oldPhase.displayName + "§7)"));
+        String rawName = newPhase.displayName.replaceAll("§[0-9a-fk-orA-FK-OR]", "");
+
+        // Timing : 10 ticks fade-in, 80 ticks visible, 20 ticks fade-out
+        player.connection.send(new ClientboundSetTitlesAnimationPacket(10, 80, 20));
+        player.connection.send(new ClientboundSetTitleTextPacket(
+            Component.literal("§6§l✦ " + newPhase.displayName + " §6§l✦")
+        ));
+        player.connection.send(new ClientboundSetSubtitleTextPacket(
+            Component.literal("§7Nouvelle phase débloquée !")
+        ));
+
+        // Message dans le chat aussi (reste consultable)
+        player.sendSystemMessage(Component.literal(
+            "§6§l✦ §eNouvelle phase : §r" + newPhase.displayName
+            + " §8(était : " + oldPhase.displayName + "§8)"
+        ));
     }
 
     public static void sendPlayerStats(ServerPlayer player, PlayerDataManager.PlayerOneBlockData data) {
