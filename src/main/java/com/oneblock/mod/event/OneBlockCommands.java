@@ -19,6 +19,7 @@ import com.oneblock.mod.world.OneBlockPhase;
 import com.oneblock.mod.world.OneBlockWorldGen;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
@@ -116,6 +117,59 @@ public class OneBlockCommands {
                         showLeaderboard(player, server);
                         return 1;
                     }))
+
+                // /oneblock moveisland <joueur>  — OP uniquement
+                .then(Commands.literal("moveisland")
+                    .requires(src -> {
+                        // Console a tous les droits ; joueur → vérifie isOp via PlayerList
+                        ServerPlayer p = src.getPlayer();
+                        return p == null || src.getServer().getPlayerList().isOp(p.nameAndId());
+                    })
+                    .then(Commands.argument("joueur", StringArgumentType.word())
+                        .executes(ctx -> {
+                            MinecraftServer server = ctx.getSource().getServer();
+                            String targetName = StringArgumentType.getString(ctx, "joueur");
+
+                            // Le joueur cible doit être connecté
+                            ServerPlayer target = server.getPlayerList().getPlayerByName(targetName);
+                            if (target == null) {
+                                ctx.getSource().sendFailure(Component.literal(
+                                    "§cLe joueur §f" + targetName + " §cdoit être connecté pour déplacer son île."));
+                                return 0;
+                            }
+                            UUID targetId = target.getUUID();
+
+                            PlayerDataManager.PlayerOneBlockData data =
+                                PlayerDataManager.getOrCreate(targetId, server);
+                            BlockPos oldPos = data.blockPos;
+
+                            // Cherche une nouvelle position aléatoire loin de tout le monde
+                            BlockPos newPos = PlayerDataManager.findRandomIslandPos(server);
+
+                            ctx.getSource().sendSystemMessage(Component.literal(
+                                "§7Déplacement de l'île de §f" + targetName + "§7…"));
+
+                            // Copie les blocs (rayon 100)
+                            ServerLevel level = server.overworld();
+                            int moved = OneBlockWorldGen.moveIslandBlocks(level, oldPos, newPos, 100);
+
+                            // Met à jour les données du joueur
+                            PlayerDataManager.relocatePlayer(targetId, newPos, server);
+
+                            // Téléporte le joueur à sa nouvelle île
+                            target.teleportTo(level,
+                                newPos.getX() + 0.5,
+                                newPos.getY() + 1.1,
+                                newPos.getZ() + 0.5,
+                                Set.of(), target.getYRot(), target.getXRot(), true);
+                            target.sendSystemMessage(Component.literal(
+                                "§6Ton île a été déplacée par un administrateur."));
+
+                            ctx.getSource().sendSystemMessage(Component.literal(
+                                "§a✓ §f" + moved + " §7blocs déplacés. Nouvelle position : §f"
+                                + newPos.getX() + ", " + newPos.getY() + ", " + newPos.getZ()));
+                            return 1;
+                        })))
         );
 
         // ── /spawn ────────────────────────────────────────────────────────────
@@ -285,6 +339,8 @@ public class OneBlockCommands {
                         })))
         );
     }
+
+    // ─── Utilitaire : retrouver un UUID par nom dans les fichiers sauvegardés ────
 
     // ─── Leaderboard ─────────────────────────────────────────────────────────
 

@@ -26,8 +26,10 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraftforge.event.entity.living.LivingFallEvent;
+import net.minecraftforge.event.entity.living.MobSpawnEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.level.BlockEvent;
+import net.minecraft.world.entity.monster.Phantom;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.listener.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -462,6 +464,15 @@ public class PlayerEventHandler {
         if (ordinal <= 15) return new ItemStack(Items.EMERALD, 2);
         if (ordinal <= 19) return new ItemStack(Items.DIAMOND, 2);
         return new ItemStack(Items.NETHERITE_SCRAP, 1);
+    }
+
+    // ─── Désactivation des spectres ─────────────────────────────────────────
+
+    @SubscribeEvent
+    public static void onCheckSpawn(MobSpawnEvent.FinalizeSpawn event) {
+        if (event.getEntity() instanceof Phantom) {
+            event.setSpawnCancelled(true);
+        }
     }
 
     // ─── Utilitaires ────────────────────────────────────────────────────────

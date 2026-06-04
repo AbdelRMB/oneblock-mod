@@ -11,20 +11,24 @@ import net.minecraft.server.MinecraftServer;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.UUID;
 
 public class PlayerDataManager {
 
-    /**
-     * Distance entre deux îles.
-     * 2000 blocs = safe même à render distance 32 chunks (512 blocs max de visibilité).
-     * Îles disposées sur l'axe X : île 0 → X=0, île 1 → X=2000, île 2 → X=4000...
-     */
-    public static final int ISLAND_SPACING = 2000;
-    public static final int BLOCK_Y        = 64;
+    public static final int BLOCK_Y             = 64;
+    /** Distance minimale entre deux îles (en blocs). */
+    public static final int MIN_ISLAND_DISTANCE = 2000;
+    /** Rayon du monde dans lequel chercher une position libre. */
+    private static final int WORLD_RADIUS       = 50_000;
+    /** Conserver pour compatibilité ascendante (données existantes sur l'axe X). */
+    public static final int ISLAND_SPACING      = MIN_ISLAND_DISTANCE;
 
+    private static final Random PLACEMENT_RANDOM = new Random();
     private static final Map<UUID, PlayerOneBlockData> playerData = new HashMap<>();
 
     /**
@@ -41,13 +45,13 @@ public class PlayerDataManager {
         if (!playerData.containsKey(playerId)) {
             PlayerOneBlockData data = loadFromDisk(playerId, server);
             if (data == null) {
-                // Nouveau joueur → lui attribuer la prochaine île libre
-                BlockPos islandPos = calculateNextIslandPos();
+                // Nouveau joueur → position aléatoire loin de toutes les îles existantes
+                BlockPos islandPos = findRandomIslandPos(server);
                 data = new PlayerOneBlockData(playerId, islandPos, 0);
                 islandCounter++;
                 saveGlobalCounter(server);
-                OneBlockMod.LOGGER.info("[OneBlock] Île #{} créée pour {} → X={}",
-                    islandCounter - 1, playerId, islandPos.getX());
+                OneBlockMod.LOGGER.info("[OneBlock] Île #{} créée pour {} → ({}, {})",
+                    islandCounter - 1, playerId, islandPos.getX(), islandPos.getZ());
             }
             playerData.put(playerId, data);
         }
@@ -56,8 +60,79 @@ public class PlayerDataManager {
 
     // ─── Calcul de position ─────────────────────────────────────────────────
 
-    private static BlockPos calculateNextIslandPos() {
+    /**
+     * Cherche une position aléatoire dans le monde, suffisamment éloignée
+     * de toutes les îles déjà existantes (cache + disque).
+     * Retente jusqu'à 200 fois avant de tomber sur un fallback linéaire.
+     */
+    public static BlockPos findRandomIslandPos(MinecraftServer server) {
+        List<BlockPos> existing = getAllIslandPositions(server);
+        for (int attempt = 0; attempt < 200; attempt++) {
+            int x = PLACEMENT_RANDOM.nextInt(WORLD_RADIUS * 2) - WORLD_RADIUS;
+            int z = PLACEMENT_RANDOM.nextInt(WORLD_RADIUS * 2) - WORLD_RADIUS;
+            BlockPos candidate = new BlockPos(x, BLOCK_Y, z);
+            boolean valid = true;
+            for (BlockPos p : existing) {
+                double dx = candidate.getX() - p.getX();
+                double dz = candidate.getZ() - p.getZ();
+                if (dx * dx + dz * dz < (long) MIN_ISLAND_DISTANCE * MIN_ISLAND_DISTANCE) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) {
+                OneBlockMod.LOGGER.info("[OneBlock] Position libre trouvée en {} tentatives : ({}, {})",
+                    attempt + 1, x, z);
+                return candidate;
+            }
+        }
+        // Fallback : placement linéaire classique
+        OneBlockMod.LOGGER.warn("[OneBlock] Aucune position aléatoire libre trouvée, fallback linéaire.");
         return new BlockPos(islandCounter * ISLAND_SPACING, BLOCK_Y, 0);
+    }
+
+    /**
+     * Renvoie toutes les positions d'îles connues (cache mémoire + scan disque).
+     * Utilisé pour garantir qu'une nouvelle île ne chevauche pas une existante.
+     */
+    public static List<BlockPos> getAllIslandPositions(MinecraftServer server) {
+        List<BlockPos> positions = new ArrayList<>();
+        // D'abord le cache mémoire
+        for (PlayerOneBlockData d : playerData.values()) {
+            positions.add(d.blockPos);
+        }
+        // Puis les fichiers sur disque (joueurs non connectés)
+        File saveDir = getSaveDir(server);
+        if (saveDir.exists()) {
+            File[] files = saveDir.listFiles((dir, name) ->
+                name.endsWith(".dat") && !name.equals("global.dat"));
+            if (files != null) {
+                for (File f : files) {
+                    try {
+                        UUID id = UUID.fromString(f.getName().replace(".dat", ""));
+                        if (playerData.containsKey(id)) continue; // déjà dans le cache
+                        CompoundTag tag = NbtIo.readCompressed(f.toPath(), NbtAccounter.unlimitedHeap());
+                        int x = tag.getInt("BlockX").orElse(Integer.MIN_VALUE);
+                        int y = tag.getInt("BlockY").orElse(BLOCK_Y);
+                        int z = tag.getInt("BlockZ").orElse(Integer.MIN_VALUE);
+                        if (x != Integer.MIN_VALUE) positions.add(new BlockPos(x, y, z));
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+        return positions;
+    }
+
+    /**
+     * Déplace l'île d'un joueur vers une nouvelle position et met à jour les données.
+     * La copie physique des blocs est effectuée par OneBlockWorldGen.
+     */
+    public static PlayerOneBlockData relocatePlayer(UUID playerId, BlockPos newPos, MinecraftServer server) {
+        PlayerOneBlockData old = getOrCreate(playerId, server);
+        PlayerOneBlockData updated = new PlayerOneBlockData(playerId, newPos, old.blocksBroken);
+        playerData.put(playerId, updated);
+        saveToDisk(updated, server);
+        return updated;
     }
 
     // ─── Compteur global (global.dat) ───────────────────────────────────────

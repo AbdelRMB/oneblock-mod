@@ -44,7 +44,12 @@ public class ShopMenu extends AbstractContainerMenu {
         new ShopEntry(200, stack(Items.SADDLE,             1), "Selle"),
         new ShopEntry(250, stack(Items.ELYTRA,             1), "Élytre"),
         new ShopEntry(500, stack(Items.NETHERITE_SCRAP,    1), "Scrap Netherite"),
-        new ShopEntry(600, stack(Items.DIAMOND_SWORD,      1), "Épée en diamant")
+        new ShopEntry(600, stack(Items.DIAMOND_SWORD,      1), "Épée en diamant"),
+        // ── Livres ────────────────────────────────────────────────────────────
+        new ShopEntry(5,   stack(Items.BOOK,               1), "Livre"),
+        new ShopEntry(15,  stack(Items.BOOK,               8), "Livre x8"),
+        new ShopEntry(30,  stack(Items.BOOKSHELF,          1), "Bibliothèque"),
+        new ShopEntry(60,  stack(Items.WRITABLE_BOOK,      1), "Livre et plume")
     );
 
     private final SimpleContainer inv;
@@ -66,8 +71,14 @@ public class ShopMenu extends AbstractContainerMenu {
                         taken.setCount(0); // empêche de prendre l'item d'affichage
                         if (player instanceof ServerPlayer sp && idx < ENTRIES.size()) {
                             buyEntry(sp, idx);
-                            // Rafraîchit le nom (solde mis à jour)
-                            refreshDisplayItem(inv, playerUUID);
+                            // Remet l'item d'affichage dans le slot
+                            ShopEntry e = ENTRIES.get(idx);
+                            ItemStack display = e.result().copy();
+                            display.set(DataComponents.CUSTOM_NAME, Component.literal(
+                                "§e" + e.label() + " §8| §6" + e.cost() + " ⬡"
+                            ));
+                            inv.setItem(idx, display);
+                            broadcastChanges();
                         }
                     }
                 });
@@ -113,10 +124,6 @@ public class ShopMenu extends AbstractContainerMenu {
             ));
             inv.setItem(i, display);
         }
-    }
-
-    private static void refreshDisplayItem(SimpleContainer inv, UUID id) {
-        // Pas de mise à jour dynamique du titre possible, les slots restent valides
     }
 
     // ─── Achat ───────────────────────────────────────────────────────────────

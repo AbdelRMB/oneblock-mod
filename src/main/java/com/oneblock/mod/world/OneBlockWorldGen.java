@@ -12,6 +12,10 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 
+import net.minecraft.world.level.block.state.BlockState;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 import java.util.Set;
 
@@ -84,6 +88,47 @@ public class OneBlockWorldGen {
             "§6§l✦ §eNouvelle phase : §r" + newPhase.displayName
             + " §8(était : " + oldPhase.displayName + "§8)"
         ));
+    }
+
+    /**
+     * Copie tous les blocs non-air dans un rayon {@code radius} autour de {@code oldCenter}
+     * vers {@code newCenter}, puis efface l'ancienne zone.
+     *
+     * Utilisé par la commande /oneblock moveisland.
+     * ⚠ Opération synchrone — à appeler depuis le thread serveur.
+     *
+     * @return nombre de blocs déplacés
+     */
+    public static int moveIslandBlocks(ServerLevel level, BlockPos oldCenter, BlockPos newCenter, int radius) {
+        // 1. Capture tous les blocs non-air dans le rayon
+        record Entry(BlockPos rel, BlockState state) {}
+        List<Entry> snapshot = new ArrayList<>();
+
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos src = oldCenter.offset(dx, dy, dz);
+                    BlockState state = level.getBlockState(src);
+                    if (!state.isAir()) {
+                        snapshot.add(new Entry(new BlockPos(dx, dy, dz), state));
+                    }
+                }
+            }
+        }
+
+        // 2. Efface l'ancienne zone
+        for (Entry e : snapshot) {
+            level.setBlock(oldCenter.offset(e.rel()), Blocks.AIR.defaultBlockState(), 3);
+        }
+
+        // 3. Colle à la nouvelle position
+        for (Entry e : snapshot) {
+            level.setBlock(newCenter.offset(e.rel()), e.state(), 3);
+        }
+
+        OneBlockMod.LOGGER.info("[OneBlock] moveIsland : {} blocs déplacés de {} vers {}",
+            snapshot.size(), oldCenter, newCenter);
+        return snapshot.size();
     }
 
     public static void sendPlayerStats(ServerPlayer player, PlayerDataManager.PlayerOneBlockData data) {
