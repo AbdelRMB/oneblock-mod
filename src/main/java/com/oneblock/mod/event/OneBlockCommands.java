@@ -305,12 +305,35 @@ public class OneBlockCommands {
         // ── /boss ─────────────────────────────────────────────────────────────
         dispatcher.register(
             Commands.literal("boss")
+                // /boss → réessaie le combat
                 .executes(ctx -> {
                     ServerPlayer p = ctx.getSource().getPlayerOrException();
-                    MinecraftServer srv = ctx.getSource().getServer();
-                    BossManager.retryBoss(p, srv.overworld());
+                    BossManager.retryBoss(p, ctx.getSource().getServer().overworld());
                     return 1;
                 })
+                // /boss invite <joueur> → invite un ami à aider
+                .then(Commands.literal("invite")
+                    .then(Commands.argument("joueur", StringArgumentType.word())
+                        .executes(ctx -> {
+                            ServerPlayer owner = ctx.getSource().getPlayerOrException();
+                            MinecraftServer server = ctx.getSource().getServer();
+                            String targetName = StringArgumentType.getString(ctx, "joueur");
+                            ServerPlayer target = server.getPlayerList().getPlayerByName(targetName);
+                            if (target == null) {
+                                ctx.getSource().sendFailure(Component.literal(
+                                    "§cJoueur §f" + targetName + " §cnon trouvé ou non connecté."));
+                                return 0;
+                            }
+                            BossManager.sendInvite(owner, target);
+                            return 1;
+                        })))
+                // /boss accept → accepte une invitation
+                .then(Commands.literal("accept")
+                    .executes(ctx -> {
+                        ServerPlayer helper = ctx.getSource().getPlayerOrException();
+                        BossManager.acceptInvite(helper, ctx.getSource().getServer());
+                        return 1;
+                    }))
         );
 
         // ── /obhelp ───────────────────────────────────────────────────────────

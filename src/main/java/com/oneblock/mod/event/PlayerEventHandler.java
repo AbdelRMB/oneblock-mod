@@ -289,8 +289,9 @@ public class PlayerEventHandler {
     public static void onLivingDeath(net.minecraftforge.event.entity.living.LivingDeathEvent event) {
         if (!(event.getEntity() instanceof net.minecraft.world.entity.LivingEntity living)) return;
         if (event.getEntity() instanceof ServerPlayer player) {
-            // Toute mort en arène boss = défaite (boss qui tue, chute, etc.)
-            if (BossManager.isInActiveFight(player.getUUID())) {
+            UUID pid = player.getUUID();
+            // Owner en combat actif OU helper dans l'arène
+            if (BossManager.isInActiveFight(pid) || BossManager.isHelper(pid)) {
                 BossManager.onPlayerKilledByBoss(player);
             }
             return;
